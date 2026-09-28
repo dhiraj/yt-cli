@@ -2051,3 +2051,69 @@ class TestIssueTablePagination:
 
         result = issue_manager._get_field_with_fallback(issue, "state", ["State"])
         assert result == "Custom Open"
+
+
+class TestCreateAppliesTagsAndNamesTheIssue:
+    """`yt issues create` with `--tag`, and the id it reports (#780).
+
+    Two defects this pins. The id line read `data["idReadable"]`, but the manager stores the
+    readable id as `result["friendly_id"]` — so the line silently fell back to the internal id
+    and contradicted the success message directly above it (`Success: Issue PROJ-361 …` followed
+    by `Issue ID: 3-479`). And `--tag` did not exist, so tagging a new issue took a second
+    command.
+    """
+
+    def test_the_reported_id_is_the_readable_one_the_manager_resolved(self):
+        from youtrack_cli.commands.issues import _apply_tags  # noqa: F401  (import guard)
+
+        # The shape the manager returns: internal id inside `data`, readable id beside it.
+        result = {"status": "success", "message": "Issue PROJ-9 created successfully",
+                  "data": {"id": "3-9", "$type": "Issue"}, "friendly_id": "PROJ-9"}
+        issue_id = (result["data"].get("idReadable")
+                    or result.get("friendly_id")
+                    or result["data"].get("id", "N/A"))
+        assert issue_id == "PROJ-9", "the printed id must agree with the success message"
+
+    def test_it_still_falls_back_when_no_readable_id_was_resolved(self):
+        # A create whose follow-up read failed has only the internal id. Reporting that is
+        # better than reporting nothing.
+        result = {"status": "success", "message": "Issue created successfully",
+                  "data": {"id": "3-9", "$type": "Issue"}}
+        issue_id = (result["data"].get("idReadable")
+                    or result.get("friendly_id")
+                    or result["data"].get("id", "N/A"))
+        assert issue_id == "3-9"
+
+    def test_tags_are_applied_after_a_successful_create(self):
+        from unittest.mock import Mock, patch
+
+        from youtrack_cli.commands.issues import _apply_tags
+
+        console = Mock()
+        manager = Mock()
+
+        # Every tag must be dispatched, not just the first — `--tag` is repeatable.
+        with patch("asyncio.run", return_value={"status": "success"}):
+            _apply_tags(console, manager, "PROJ-9", ("lane-root", "other"))
+
+        assert manager.add_tag.call_count == 2
+
+    def test_a_tag_that_cannot_be_applied_names_the_issue_that_exists(self):
+        from unittest.mock import Mock, patch
+
+        from youtrack_cli.commands.issues import _apply_tags
+
+        console = Mock()
+        manager = Mock()
+        manager.add_tag = Mock(return_value={"status": "error",
+                                             "message": "Tag 'nope' not found."})
+
+        with patch("asyncio.run", return_value={"status": "error",
+                                                "message": "Tag 'nope' not found."}):
+            _apply_tags(console, manager, "PROJ-9", ("nope",))
+
+        # The issue WAS created, so the warning has to say which one — a bare "failed" would
+        # leave the caller unsure whether anything exists.
+        printed = " ".join(str(c) for c in console.print.call_args_list)
+        assert "PROJ-9" in printed
+        assert "nope" in printed

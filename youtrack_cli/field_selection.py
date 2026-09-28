@@ -21,8 +21,14 @@ logger = get_logger(__name__)
 # Predefined field profiles for common use cases
 FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
     "issues": {
+        # `idReadable` is in every profile, `minimal` included. It is the only stable public
+        # name for an issue: `id` is an internal id (`3-353`) and `numberInProject` alone is
+        # ambiguous across projects, so without it a caller cannot name what it just created or
+        # address an issue on a subsequent call. It is one short field and its absence is the
+        # entire defect (#780).
         "minimal": [
             "id",
+            "idReadable",
             "numberInProject",
             "summary",
             "state(name,id)",
@@ -31,6 +37,7 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
             # Lean JSON-friendly set: core fields + description, but NO customFields
             # expansion, which dominates payload size on large fetches (#727).
             "id",
+            "idReadable",
             "numberInProject",
             "summary",
             "description",
@@ -44,6 +51,7 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
         ],
         "standard": [
             "id",
+            "idReadable",
             "numberInProject",
             "summary",
             "description",
@@ -59,6 +67,7 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
         ],
         "full": [
             "id",
+            "idReadable",
             "numberInProject",
             "summary",
             "description",
