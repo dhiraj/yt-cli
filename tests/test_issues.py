@@ -2094,9 +2094,10 @@ class TestCreateAppliesTagsAndNamesTheIssue:
 
         # Every tag must be dispatched, not just the first — `--tag` is repeatable.
         with patch("asyncio.run", return_value={"status": "success"}):
-            _apply_tags(console, manager, "PROJ-9", ("lane-root", "other"))
+            applied = _apply_tags(console, manager, "PROJ-9", ("lane-root", "other"))
 
         assert manager.add_tag.call_count == 2
+        assert applied is True, "the caller needs this to decide its exit code"
 
     def test_a_tag_that_cannot_be_applied_names_the_issue_that_exists(self):
         from unittest.mock import Mock, patch
@@ -2110,7 +2111,11 @@ class TestCreateAppliesTagsAndNamesTheIssue:
 
         with patch("asyncio.run", return_value={"status": "error",
                                                 "message": "Tag 'nope' not found."}):
-            _apply_tags(console, manager, "PROJ-9", ("nope",))
+            applied = _apply_tags(console, manager, "PROJ-9", ("nope",))
+
+        # A dropped tag is a partial success, and the command must exit non-zero for it —
+        # automation reading only the exit code would otherwise be told everything worked.
+        assert applied is False
 
         # The issue WAS created, so the warning has to say which one — a bare "failed" would
         # leave the caller unsure whether anything exists.

@@ -1174,7 +1174,13 @@ class IssueService(BaseService):
             API response with creation result
         """
         try:
-            # Resolve issue IDs to internal format
+            # Resolve issue IDs to internal format.
+            #
+            # The originals are kept for the message: `_resolve_issue_id` returns the internal
+            # id (`3-482`), and reporting that back is the same defect the create command had —
+            # the user typed a readable id, and an internal one is neither what they typed nor
+            # something they can paste into another command.
+            source_readable, target_readable = source_issue_id, target_issue_id
             source_issue_id = await self._resolve_issue_id(source_issue_id)
             target_issue_id = await self._resolve_issue_id(target_issue_id)
             # If link_type_id looks like a name (not an ID), we need to get the actual ID first
@@ -1222,7 +1228,7 @@ class IssueService(BaseService):
             if response.status_code == 200:
                 return {
                     "status": "success",
-                    "message": f"Link created between {source_issue_id} and {target_issue_id}",
+                    "message": f"Link created between {source_readable} and {target_readable}",
                     "data": {},
                 }
             else:
@@ -1245,7 +1251,8 @@ class IssueService(BaseService):
             API response with deletion result
         """
         try:
-            # Resolve issue IDs to internal format
+            # Resolve issue IDs to internal format; the originals are kept for the message.
+            source_readable, target_readable = source_issue_id, target_issue_id
             source_issue_id = await self._resolve_issue_id(source_issue_id)
             target_issue_id = await self._resolve_issue_id(target_issue_id)
 
@@ -1295,7 +1302,7 @@ class IssueService(BaseService):
             if response.status_code == 200:
                 return {
                     "status": "success",
-                    "message": f"Link deleted between {source_issue_id} and {target_issue_id}",
+                    "message": f"Link deleted between {source_readable} and {target_readable}",
                     "data": {},
                 }
             else:

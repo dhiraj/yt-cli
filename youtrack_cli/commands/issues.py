@@ -236,26 +236,34 @@ def _parse_custom_fields(custom_field_tuples: tuple) -> dict:
     return parsed
 
 
-def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> None:
-    """Apply each tag to an already-created issue, reporting every outcome.
+def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> bool:
+    """Apply each tag to an already-created issue. Returns False if any was not applied.
 
     Tags live on a separate resource, so this cannot be folded into the create payload — the API
     takes `{"id": …}` resolved from a name, which `IssueService.add_tag` already does. What is
     decided here is the reporting: the issue now exists, so a failure must say *which* issue and
     *which* tag rather than leaving the caller to guess whether anything was created. A tag that
     does not exist is a refusal by name, never a silent skip.
+
+    The caller exits non-zero when this returns False. A create that dropped a tag is a *partial*
+    success, and a script reading only the exit code would otherwise be told everything worked.
+    The message names the issue precisely so the tag can be retried without re-creating it.
     """
     import asyncio
 
+    applied = True
     for tag_name in tags:
         result = asyncio.run(issue_manager.add_tag(issue_id, tag_name))
         if result["status"] == "success":
             console.print(f"[green]Tagged:[/green] {tag_name}")
         else:
+            applied = False
             console.print(
-                f"⚠️  Issue {issue_id} was created but the tag '{tag_name}' was not applied: {result['message']}",
+                f"⚠️  Issue {issue_id} was created but the tag '{tag_name}' was not applied: "
+                f"{result['message']}. The issue exists — retry the tag, do not re-create it.",
                 style="yellow",
             )
+    return applied
 
 
 def add_help_verbose_option(func):
@@ -426,7 +434,11 @@ def create(
             # here is reported with the issue id, because the issue exists — saying only
             # "failed" would leave the caller unsure whether anything was created.
             if tag and issue_id != "N/A":
-                _apply_tags(console, issue_manager, issue_id, tag)
+                if not _apply_tags(console, issue_manager, issue_id, tag):
+                    # Exit non-zero: the issue was created, but the command did not do all of
+                    # what it was asked to. A caller reading only the exit code must not be told
+                    # this succeeded.
+                    raise click.ClickException("Issue created, but one or more tags were not applied")
 
         else:
             # Create enhanced error for common API failures

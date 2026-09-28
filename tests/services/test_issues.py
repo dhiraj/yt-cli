@@ -1056,3 +1056,31 @@ class TestIssueServiceErrorHandling:
                     assert mock_error.call_count == 2
                 else:
                     mock_error.assert_called_once()
+
+
+class TestCreateLinkNamesTheIssuesTheCallerTyped:
+    """The link message must use the readable ids the caller passed (#780).
+
+    `create_link` resolves both endpoints to internal ids (`3-482`) before posting, because the
+    endpoint requires them — but the variables it overwrote were the ones the message then
+    reported, so a successful link said `Link created between 3-482 and 3-481`. That is the same
+    defect the create command had: the user typed a readable id, and an internal one is neither
+    what they typed nor something they can paste into another command.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_message_reports_what_the_caller_typed(self, issue_service, mock_response):
+        with (
+            patch.object(issue_service, "_resolve_issue_id", new_callable=AsyncMock) as resolve,
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as request,
+        ):
+            # The API needs internal ids; the message must not show them.
+            resolve.side_effect = ["3-482", "3-481"]
+            request.return_value = mock_response
+            mock_response.status_code = 200
+
+            result = await issue_service.create_link("PROJ-9", "PROJ-8", "166-1s")
+
+        assert result["status"] == "success"
+        assert "PROJ-9" in result["message"] and "PROJ-8" in result["message"]
+        assert "3-482" not in result["message"], "an internal id is not an address a user can reuse"
