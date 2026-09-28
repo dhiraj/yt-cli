@@ -236,6 +236,28 @@ def _parse_custom_fields(custom_field_tuples: tuple) -> dict:
     return parsed
 
 
+def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> None:
+    """Apply each tag to an already-created issue, reporting every outcome.
+
+    Tags live on a separate resource, so this cannot be folded into the create payload — the API
+    takes `{"id": …}` resolved from a name, which `IssueService.add_tag` already does. What is
+    decided here is the reporting: the issue now exists, so a failure must say *which* issue and
+    *which* tag rather than leaving the caller to guess whether anything was created. A tag that
+    does not exist is a refusal by name, never a silent skip.
+    """
+    import asyncio
+
+    for tag_name in tags:
+        result = asyncio.run(issue_manager.add_tag(issue_id, tag_name))
+        if result["status"] == "success":
+            console.print(f"[green]Tagged:[/green] {tag_name}")
+        else:
+            console.print(
+                f"⚠️  Issue {issue_id} was created but the tag '{tag_name}' was not applied: {result['message']}",
+                style="yellow",
+            )
+
+
 def add_help_verbose_option(func):
     """Decorator to add --help-verbose option to issues commands."""
 
@@ -308,6 +330,11 @@ def issues() -> None:
     multiple=True,
     help='Custom field in format "FieldName=value" (can be used multiple times)',
 )
+@click.option(
+    "--tag",
+    multiple=True,
+    help="Tag name to apply (can be used multiple times). The tag must already exist.",
+)
 @click.pass_context
 def create(
     ctx: click.Context,
@@ -318,6 +345,7 @@ def create(
     priority: str | None,
     assignee: str | None,
     custom_field: tuple,
+    tag: tuple,
 ) -> None:
     r"""Create a new issue.
 
@@ -338,6 +366,10 @@ def create(
         yt issues create INFRA-789 "Update certificates" \
             --type Task --priority Medium \
             --custom-field "Team=Infrastructure" --custom-field "Sprint=Sprint 1"
+
+        # Create and tag in one command
+        yt issues create PROJ-1 "A new task" \
+            --custom-field "State=Submitted" --tag needs-triage
 
     Tip: Issue types and priorities are project-specific. Use values that exist in your YouTrack project.
     """
@@ -376,9 +408,26 @@ def create(
         if result["status"] == "success":
             display_success(f"{result['message']}")
             issue = result["data"]
-            # Display friendly ID if available, otherwise fall back to internal ID
-            issue_id = issue.get("idReadable") or issue.get("id", "N/A")
+            # Display friendly ID if available, otherwise fall back to internal ID.
+            #
+            # `friendly_id` is where `IssueManager.create_issue` actually puts the readable id —
+            # it resolves it with a follow-up read and stores it as a sibling of `data`, because
+            # the create response itself carries only the internal id. Reading `data["idReadable"]`
+            # therefore always missed, and the line fell through to the internal id even though
+            # the success message above it said `PROJ-361`. Guarding on `friendly_id` first fixes
+            # the contradiction; the `idReadable` read stays for any caller that does populate it.
+            issue_id = issue.get("idReadable") or result.get("friendly_id") or issue.get("id", "N/A")
             console.print(f"[blue]Issue ID:[/blue] {issue_id}")
+
+            # Tags are a separate resource, so they are applied after the create. They are
+            # intentionally *not* folded into the create payload: the API wants `{"id": …}`
+            # resolved from a tag name, and a name that does not exist is refused by name
+            # rather than silently dropped, which is the behaviour worth keeping. A failure
+            # here is reported with the issue id, because the issue exists — saying only
+            # "failed" would leave the caller unsure whether anything was created.
+            if tag and issue_id != "N/A":
+                _apply_tags(console, issue_manager, issue_id, tag)
+
         else:
             # Create enhanced error for common API failures
             if "project" in result["message"].lower() and "not found" in result["message"].lower():

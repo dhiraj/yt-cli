@@ -49,6 +49,18 @@ Create new issues in YouTrack projects.
   * ``-p, --priority TEXT`` - Issue priority (e.g., Critical, High, Medium, Low)
   * ``-a, --assignee TEXT`` - Username of the assignee
   * ``-cf, --custom-field TEXT`` - Custom field in format "FieldName=value" (repeatable)
+  * ``--tag TEXT`` - Tag name to apply (repeatable). The tag must already exist.
+
+**Tags**
+
+``--tag`` applies tags to the new issue in the same command. Tags live on a separate resource,
+so they are applied immediately after the issue is created; if one cannot be applied, the
+warning names both the issue and the tag, because the issue exists either way. A tag that does
+not exist is refused **by name** rather than skipped — create it first with ``yt tags create``.
+
+.. code-block:: bash
+
+   yt issues create PROJ-1 "New task" -cf "State=Submitted" --tag lane-root --tag fleet
 
 **Custom Fields**
 
@@ -82,6 +94,22 @@ The CLI automatically detects the field type from the project configuration. If 
 
    # User field (use login name)
    yt issues create PROJ-1 "Task" -cf "Reviewer=john.doe"
+
+   # Creating and tagging in one command
+   yt issues create PROJ-1 "New task" -cf "State=Submitted" --tag lane-root
+
+**Output**
+
+A successful create reports the issue's readable id (``PROJ-1``), not its internal id
+(``3-42``) — the two are different things and only the first is stable across projects. The id is
+resolved with a follow-up read after the create, so when that read fails the internal id is
+reported instead rather than nothing:
+
+.. code-block:: text
+
+   Success: Issue PROJ-1 created successfully
+   Issue ID: PROJ-1
+   Tagged: lane-root
 
 List Issues
 ~~~~~~~~~~~

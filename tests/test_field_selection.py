@@ -375,3 +375,27 @@ class TestFieldSelection:
         assert "description" not in excluded_fields
         assert "attachments(name,size,url)" not in excluded_fields
         assert len(excluded_fields) < len(full_fields)
+
+
+class TestIssueProfilesExposeIdReadable:
+    """Every `issues` profile must carry `idReadable` (#780).
+
+    `id` is an internal id (`3-353`) and `numberInProject` is ambiguous across projects, so
+    `idReadable` is the only stable public name for an issue. It is what a caller prints after
+    creating one and what it addresses on the next call. A profile without it cannot name an
+    issue, which is the whole defect — and `minimal` is included, because a caller that asked
+    for the smallest possible payload still needs to know what it just made.
+    """
+
+    def test_every_issues_profile_includes_id_readable(self):
+        selector = FieldSelector()
+        for profile_name in selector.get_available_profiles("issues"):
+            selected = selector.get_fields("issues", profile_name).split(",")
+            assert "idReadable" in selected, f"issues:{profile_name} cannot name an issue"
+
+    def test_the_articles_profiles_still_carry_it_too(self):
+        # They always did; pinned so a later edit to one entity does not quietly drop the other.
+        selector = FieldSelector()
+        for profile_name in selector.get_available_profiles("articles"):
+            selected = selector.get_fields("articles", profile_name).split(",")
+            assert "idReadable" in selected, f"articles:{profile_name} lost idReadable"

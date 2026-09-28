@@ -290,9 +290,14 @@ Field Selection Profiles
 
 Three predefined profiles optimize for different use cases:
 
-- **minimal**: Essential fields only (id, summary, state) - 75% data reduction
+- **minimal**: Essential fields only (id, idReadable, summary, state) - 75% data reduction
 - **standard**: Common fields for general use (default) - 43% faster than full
 - **full**: All available fields including custom fields and attachments
+
+Every profile includes ``idReadable``. It costs one short field and is the only stable public
+name for an issue — ``id`` is an internal id and ``numberInProject`` is ambiguous across
+projects — so a caller that asked for the smallest possible payload still needs it to know what
+it just listed.
 
 .. code-block:: bash
 
@@ -304,6 +309,9 @@ Three predefined profiles optimize for different use cases:
 
    # Use full profile when you need all details
    yt issues list --profile full
+
+   # Every issue profile names each issue, ready for --format json
+   yt issues list --profile minimal --format json
 
 Custom Field Selection
 """"""""""""""""""""""

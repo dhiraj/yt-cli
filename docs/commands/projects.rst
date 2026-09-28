@@ -375,6 +375,30 @@ List all custom fields configured for a specific project.
    # Output as JSON for automation
    yt projects fields FPU --format json
 
+**Allowed values**
+
+The default output names each field and its type, but not the values a field will accept. Ask
+for the bundle explicitly:
+
+.. code-block:: bash
+
+   # Every field with its allowed values, ready to parse
+   yt projects fields FPU --format json --fields "id,field(name),bundle(values(name,id))"
+
+.. code-block:: text
+
+   [
+     { "field": { "name": "State" },
+       "bundle": { "values": [ { "name": "Submitted", "id": "159-0" }, ... ] } },
+     { "field": { "name": "Repo" },
+       "bundle": { "values": [ { "name": "backend", "id": "157-45" }, ... ] } }
+   ]
+
+This is the only way to read a field's vocabulary. Requesting ``values(name)`` on its own
+resolves to nothing, because the values hang off the field's *bundle* — ``bundle(values(...))``,
+not ``values(...)``. Each value carries a stable ``id`` that can be sent back in a payload, so a
+caller can pin a field by id and survive a later rename of the display name.
+
 Custom Fields Discovery
 ~~~~~~~~~~~~~~~~~~~~~~~
 
