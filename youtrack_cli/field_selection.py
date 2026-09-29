@@ -13,6 +13,8 @@ __all__ = [
     "FieldSelector",
     "get_field_selector",
     "FIELD_PROFILES",
+    "parse_field_expression",
+    "find_missing_fields",
 ]
 
 logger = get_logger(__name__)
@@ -21,17 +23,28 @@ logger = get_logger(__name__)
 # Predefined field profiles for common use cases
 FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
     "issues": {
-        # `idReadable` is in every profile, `minimal` included. It is the only stable public
-        # name for an issue: `id` is an internal id (`3-353`) and `numberInProject` alone is
-        # ambiguous across projects, so without it a caller cannot name what it just created or
-        # address an issue on a subsequent call. It is one short field and its absence is the
-        # entire defect (#780).
+        # Two things these lists deliberately do NOT contain, both verified per-name against the
+        # live instance in every spelling (lower-case, capitalised, with and without children):
+        #
+        # * `idReadable` is in every profile. It is the only stable public name for an issue: `id`
+        #   is an internal id (`3-353`) and `numberInProject` alone is ambiguous across projects, so
+        #   without it a caller cannot name what it just created or address an issue on a
+        #   subsequent call. It is one short field and its absence is the entire defect (#780).
+        # * `state`, `priority` and `type` are *not* top-level issue fields. The API drops them, so
+        #   requesting them cost payload and returned nothing — and unlike `assignee` next to it,
+        #   that is provable rather than assumed: every issue in the project carries all three, so
+        #   their absence shows the field is not there. Their values arrive inside `customFields`,
+        #   which `standard` and `full` already expand. They were here for a long time precisely
+        #   because nothing reported that they were being dropped.
+        # * `assignee` *is* a field and stays. It looks identical to the three above on a project
+        #   where nothing is assigned, which is what once led to it being removed too — but an
+        #   empty value is not a dropped field, and the two are told apart by `KNOWN_ISSUE_FIELDS`
+        #   rather than by what a response happens to contain.
         "minimal": [
             "id",
             "idReadable",
             "numberInProject",
             "summary",
-            "state(name,id)",
         ],
         "compact": [
             # Lean JSON-friendly set: core fields + description, but NO customFields
@@ -41,9 +54,6 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
             "numberInProject",
             "summary",
             "description",
-            "state(name,id)",
-            "priority(name,id)",
-            "type(name,id)",
             "assignee(login,fullName,id)",
             "project(id,name,shortName)",
             "created",
@@ -55,11 +65,8 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
             "numberInProject",
             "summary",
             "description",
-            "state(name,id)",
-            "priority(name,id)",
-            "type(name,id)",
-            "assignee(login,fullName,id)",
             "reporter(login,fullName,id)",
+            "assignee(login,fullName,id)",
             "project(id,name,shortName)",
             "created",
             "updated",
@@ -71,11 +78,8 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
             "numberInProject",
             "summary",
             "description",
-            "state(name,id)",
-            "priority(name,id)",
-            "type(name,id)",
-            "assignee(login,fullName,id)",
             "reporter(login,fullName,id)",
+            "assignee(login,fullName,id)",
             "project(id,name,shortName)",
             "created",
             "updated",
@@ -207,6 +211,191 @@ FIELD_PROFILES: dict[str, dict[str, list[str]]] = {
         ],
     },
 }
+
+
+# --------------------------------------------------------------------------- #
+# Verifying that a `--fields` expression actually returned what it asked for.
+#
+# YouTrack does not fail a request that names a field it does not know: it drops the unknown
+# name from the response and returns 200. So `--fields 'idReadble,summary'` — one character of
+# typo — prints a payload with no `idReadable` in it, exits 0, and says nothing. The read looks
+# like it worked, which is the whole problem: a caller cannot name what it just read, and cannot
+# tell a short payload from a short answer.
+#
+# The check below therefore compares the request against the response instead of against a
+# catalogue of valid field names. A catalogue would be a second thing to keep correct and would
+# silently go stale whenever a server gains a field; the response is already in hand and is
+# authoritative by construction.
+# --------------------------------------------------------------------------- #
+
+
+class _FieldNode:
+    """One ``name(child, child)`` term of a ``--fields`` expression."""
+
+    __slots__ = ("name", "children")
+
+    def __init__(self, name: str, children: list[_FieldNode]):
+        self.name = name
+        self.children = children
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        if not self.children:
+            return self.name
+        inner = ",".join(repr(c) for c in self.children)
+        return f"{self.name}({inner})"
+
+
+def parse_field_expression(expression: str) -> list[_FieldNode]:
+    """Parse a ``--fields`` expression into a tree of :class:`_FieldNode`.
+
+    Splits on commas at each nesting level, so ``customFields(name,value(name,id))`` parses as one
+    term with two children, the second of which has two of its own. An unbalanced expression is
+    parsed as far as it goes; the command's own syntactic validation reports the imbalance, and
+    this function's job is to find names the server dropped.
+    """
+    nodes, _ = _parse_level(expression, 0)
+    return nodes
+
+
+_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
+
+
+def _parse_level(text: str, pos: int) -> tuple[list[_FieldNode], int]:
+    """Parse comma-separated terms starting at ``pos`` until a ``)`` or the end of ``text``.
+
+    Returns the terms and the index of the ``)`` that ended the level (or ``len(text)``), leaving
+    the caller to consume it.
+    """
+    nodes: list[_FieldNode] = []
+    end = len(text)
+    while pos < end:
+        char = text[pos]
+        if char in ", \t":
+            pos += 1
+            continue
+        if char == ")":
+            return nodes, pos
+        if char not in _NAME_CHARS:
+            # Not a name and not structure (a stray quote, say): skip it rather than spin.
+            pos += 1
+            continue
+
+        start = pos
+        while pos < end and text[pos] in _NAME_CHARS:
+            pos += 1
+        name = text[start:pos]
+
+        children: list[_FieldNode] = []
+        if pos < end and text[pos] == "(":
+            children, pos = _parse_level(text, pos + 1)
+            if pos < end and text[pos] == ")":
+                pos += 1
+        nodes.append(_FieldNode(name, children))
+
+    return nodes, pos
+
+
+def _edit_distance_within(a: str, b: str, limit: int) -> bool:
+    """True when ``a`` and ``b`` differ by at most ``limit`` characters.
+
+    Used only to recognise a misspelling of a name that *did* come back, so a cheap
+    bounded Levenshtein is enough; ``limit`` is 2, which catches every transposition
+    and single-character slip in a field name.
+    """
+    if a == b:
+        return False
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        best = i
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            value = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            current.append(value)
+            best = min(best, value)
+        if best > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+# How close a requested name must be to a name that *did* come back to count as a misspelling of
+# it. 2 catches every single-character slip and every transposition, which is what a hand-typed
+# field name actually suffers from.
+_MISSPELLING_LIMIT = 2
+
+
+def find_missing_fields(expression: str, records: object) -> list[str]:
+    """Return the top-level names in ``expression`` that the API did not return.
+
+    ``records`` is the decoded response — a list of issue dicts, or a single dict. The result is
+    sorted and de-duplicated so the message is stable across runs.
+
+    **No catalogue of valid field names is consulted, and that is the whole design.** Two earlier
+    designs were tried and both were unsound:
+
+    * Comparing purely against the response reported any name that was absent, which refuses a
+      correct read: ``parentIssueLink`` is a real field, absent from every issue in a project where
+      nothing is a sub-task, and that response is indistinguishable from a typo.
+    * Adding a hand-written list of the documented fields fixed that and created the opposite
+      failure, because such a list is a copy that goes stale — a transcription of one server
+      version quietly accepts names a later one rejects, and a hand-maintained list is a second
+      thing to keep correct.
+
+    So a name is reported only when the response gives positive evidence against it, from one of
+    two signals that need no knowledge of the schema:
+
+    * **Nothing requested came back at all.** A request whose every name is absent is not a
+      request that happened to be empty; the whole expression is wrong. This catches the one-name
+      case, where there is nothing else to compare against.
+    * **It is a near-miss for a name that did come back** — within two characters. ``idReadble``
+      next to a returned ``idReadable`` is a typo whatever the schema says, so it is reported
+      without needing to know that ``idReadable`` is a field.
+
+    A name that is merely absent is not reported: an empty value is indistinguishable from an
+    unknown field, and refusing a read that worked is the worse failure. The cost is that an
+    invented name with no near neighbour — ``notAField`` beside ``summary`` — slips through and is
+    dropped, which is the behaviour this check replaced. That is the deliberate trade: a caller
+    still gets a loud, actionable error for the common slip, and no working read is ever broken.
+
+    Nested subfields are never reported. The API answers by returning *only what it was asked for*,
+    so a nested subfield that does not apply to a field's type produces the same bytes as one that
+    was misspelled — ``value(name)`` on a text field returns ``{"$type": "TextFieldValue"}`` and
+    ``value(bogus)`` returns ``{"$type": ...}``. There is no signal to separate them.
+    """
+    if not expression or not expression.strip():
+        return []
+
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list) or not records:
+        # Nothing came back, so there is nothing to compare against. That is an empty result,
+        # not a bad expression, and the caller reports it as such.
+        return []
+
+    requested = {node.name for node in parse_field_expression(expression)}
+    if not requested:
+        return []
+
+    present: set[str] = set()
+    for record in records:
+        if isinstance(record, dict):
+            present |= set(record)
+
+    absent = requested - present
+    if not absent:
+        return []
+
+    # Every requested name is absent: the expression is wrong, whatever the schema says.
+    if not requested & present:
+        return sorted(absent)
+
+    # Otherwise report only the names that look like a misspelling of something that did arrive.
+    return sorted(
+        name for name in absent if any(_edit_distance_within(name, other, _MISSPELLING_LIMIT) for other in present)
+    )
 
 
 class FieldProfile:

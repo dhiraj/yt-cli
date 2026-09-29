@@ -153,14 +153,39 @@ class TestIssueServiceRetrieval:
 
             expected_params = {
                 "fields": (
-                    "id,summary,description,state,priority,type,"
+                    "id,idReadable,summary,description,"
                     "assignee(login,fullName),project(id,name),created,updated,"
-                    "tags(name),links(linkType,direction,issues(id,summary)),"
+                    "tags(name),links(linkType(name),direction,issues(id,summary)),"
                     "customFields(id,name,value(login,fullName,name))"
                 )
             }
             mock_request.assert_called_once_with("GET", "issues/TEST-1", params=expected_params)
             assert result["data"]["id"] == "TEST-1"
+
+    @pytest.mark.asyncio
+    async def test_get_issue_default_fields_name_the_issue_and_its_links(self, issue_service, mock_response):
+        """Two properties of the default field list, both of which were wrong.
+
+        `idReadable` is the only stable public name for an issue, so a caller that fetched one
+        issue as data had no way to name it (#780 — every profile carries it for this reason).
+
+        `linkType(name)` rather than a bare `linkType`: asked for on its own the API returns an
+        object carrying only `$type`, so the name never arrived and each renderer read
+        `linkType.get("name", "")` and got an empty string. Verified against the live instance.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"data": {"id": "TEST-1"}}
+
+            await issue_service.get_issue("TEST-1")
+
+            fields = mock_request.call_args.kwargs["params"]["fields"]
+            assert "idReadable" in fields, "a single-issue read must be able to name the issue"
+            assert "linkType(name)" in fields, "a bare linkType returns no name"
+            assert "links(linkType," not in fields, "the bare form is what returns no name"
 
     @pytest.mark.asyncio
     async def test_get_issue_with_custom_fields(self, issue_service, mock_response):
@@ -192,7 +217,7 @@ class TestIssueServiceRetrieval:
             expected_params = {
                 "query": "assignee: me",
                 "fields": (
-                    "id,idReadable,summary,description,state,priority,type,"
+                    "id,idReadable,summary,description,"
                     "assignee(login,fullName),project(id,name,shortName),"
                     "created,updated,tags(name),"
                     "customFields(id,name,value(login,fullName,name))"

@@ -6,7 +6,9 @@ from youtrack_cli.field_selection import (
     FIELD_PROFILES,
     FieldProfile,
     FieldSelector,
+    find_missing_fields,
     get_field_selector,
+    parse_field_expression,
 )
 
 
@@ -325,17 +327,44 @@ class TestFieldSelection:
         assert "id" in fields
         assert "numberInProject" in fields
         assert "summary" in fields
-        assert "state(name,id)" in fields
+        assert "idReadable" in fields
 
     def test_issues_standard_profile(self):
         """Test issues standard profile has common fields."""
         selector = FieldSelector()
         fields = selector.get_fields("issues", "standard")
 
-        # Should include assignee and project info
-        assert "assignee(login,fullName,id)" in fields
+        # Should include reporter and project info
+        assert "reporter(login,fullName,id)" in fields
         assert "project(id,name,shortName)" in fields
         assert "description" in fields
+
+    def test_no_issues_profile_names_a_field_the_api_drops(self):
+        """`state`, `priority` and `type` are not top-level issue fields.
+
+        Provable rather than assumed: every issue in the project carries all three inside
+        `customFields`, and requesting them directly still returns nothing — so the field is absent
+        because it does not exist, not because the value is empty. `assignee` is the contrast case
+        and must stay: it looks identical on a project where nothing is assigned, which is what
+        once led to it being removed too, but an empty value is not a dropped field.
+        """
+        selector = FieldSelector()
+        for profile_name in selector.get_available_profiles("issues"):
+            requested = [f.strip() for f in selector.get_fields("issues", profile_name).split(",")]
+            for dropped in ("state", "priority", "type", "State", "Priority", "Type"):
+                assert not any(f == dropped or f.startswith(f"{dropped}(") for f in requested), (
+                    f"issues:{profile_name} still requests {dropped}, which is not an issue field"
+                )
+
+    def test_assignee_is_still_requested_where_it_applies(self):
+        # Pinned so the false removal of round 2 cannot come back: an all-null assignee must not
+        # read as a dropped field, and a profile that stops asking loses the value where one exists.
+        selector = FieldSelector()
+        for profile_name in ("compact", "standard", "full"):
+            requested = [f.strip() for f in selector.get_fields("issues", profile_name).split(",")]
+            assert any(f.startswith("assignee(") for f in requested), (
+                f"issues:{profile_name} stopped requesting assignee"
+            )
 
     def test_projects_minimal_vs_full(self):
         """Test projects field profiles have appropriate scope."""
@@ -399,3 +428,202 @@ class TestIssueProfilesExposeIdReadable:
         for profile_name in selector.get_available_profiles("articles"):
             selected = selector.get_fields("articles", profile_name).split(",")
             assert "idReadable" in selected, f"articles:{profile_name} lost idReadable"
+
+
+class TestParseFieldExpression:
+    """A `--fields` expression has to be understood before it can be checked against a response."""
+
+    def test_nests_children(self):
+        nodes = parse_field_expression("customFields(name,value(name,id))")
+        assert [n.name for n in nodes] == ["customFields"]
+        assert [c.name for c in nodes[0].children] == ["name", "value"]
+        assert [c.name for c in nodes[0].children[1].children] == ["name", "id"]
+
+    def test_splits_top_level_terms(self):
+        nodes = parse_field_expression("idReadable,summary,tags(name)")
+        assert [n.name for n in nodes] == ["idReadable", "summary", "tags"]
+
+    def test_handles_the_shape_the_spec_gate_sends(self):
+        # The deep expression the standing gate relies on: two terms, three levels.
+        nodes = parse_field_expression("idReadable,links(direction,linkType(name),issues(idReadable))")
+        links = nodes[1]
+        assert links.name == "links"
+        assert [c.name for c in links.children] == ["direction", "linkType", "issues"]
+        assert [c.name for c in links.children[1].children] == ["name"]
+        assert [c.name for c in links.children[2].children] == ["idReadable"]
+
+    def test_tolerates_whitespace_and_unbalanced_input(self):
+        # Unbalanced input is the command's syntactic validator's job to report; this must not
+        # raise on its way to the response comparison.
+        assert [n.name for n in parse_field_expression(" idReadable , summary ")] == ["idReadable", "summary"]
+        assert [n.name for n in parse_field_expression("value(name")] == ["value"]
+
+    def test_skips_a_character_that_cannot_start_a_name(self):
+        # Defensive: a stray quote or bracket must be stepped over rather than looped on or
+        # mistaken for structure. What follows a stray character still parses as its own name,
+        # which is the right outcome for malformed input — the server will not return it, so it
+        # is reported as a field that was asked for and not given, rather than silently dropped.
+        assert [n.name for n in parse_field_expression("[idReadable]")] == ["idReadable"]
+        assert [n.name for n in parse_field_expression('idReadable"x"')] == ["idReadable", "x"]
+
+
+class TestFindMissingFields:
+    """The defect: the API drops an unknown field and answers 200, so a typo is invisible."""
+
+    def test_reports_a_misspelled_name_that_has_a_neighbour_in_the_response(self):
+        # `idReadable` was asked for too and arrived, so `idReadble` beside it is a typo whatever
+        # the schema says. This is the case the check is actually good at.
+        records = [{"idReadable": "V", "summary": "s"}]
+        assert find_missing_fields("idReadble,idReadable,summary", records) == ["idReadble"]
+
+    def test_reports_an_invented_top_level_name_only_when_nothing_came_back(self):
+        # With `idReadable` absent too, nothing requested arrived — an expression that is wrong
+        # rather than one that happened to be empty — so both names are reported. When something
+        # *did* arrive, an invented name with no near neighbour is not; see the next test.
+        assert find_missing_fields("idReadable,notAField", [{"summary": "s"}]) == ["idReadable", "notAField"]
+
+    def test_clean_expression_reports_nothing(self):
+        assert find_missing_fields("idReadable,summary", [{"idReadable": "VAN-1", "summary": "s"}]) == []
+
+    def test_a_nested_typo_beside_a_correct_sibling_is_not_reported(self):
+        # The deliberate limit of the check, pinned so it is not mistaken for a guarantee.
+        #
+        # `linkType(nom)` is a misspelling, and a stricter rule would want to report it. It is not
+        # reported, because `{"name": "Depend"}` is real data and there is no way to tell a
+        # misspelled subfield from one that simply does not apply to this object's type — the same
+        # ambiguity that makes a text field's `{"text": ...}` a legitimate answer to `value(name,id)`.
+        # Reporting it would reject correct reads, which is the worse failure.
+        #
+        # What this costs: the typo slips through and the name is dropped, which is the behaviour
+        # this module replaced. It never turns a good read into a failed one.
+        records = [{"links": [{"direction": "OUTWARD", "linkType": {"name": "Depend"}, "issues": []}]}]
+        assert find_missing_fields("links(direction,linkType(nom))", records) == []
+
+    def test_a_misspelled_id_beside_correct_data_is_not_reported(self):
+        # Same trade, on the path that motivated the change: `issues(idReadble)` alongside data
+        # that came back correctly is not reported. See the test above for why.
+        records = [{"links": [{"direction": "OUTWARD", "issues": [{"idReadable": "V"}]}]}]
+        assert find_missing_fields("links(direction,issues(idReadble))", records) == []
+
+    def test_a_polymorphic_bundle_value_is_not_a_missing_field(self):
+        # The profiles ask for one union of subfields across every bundle type; an enum answers
+        # name/id and a user answers login/fullName. Flagging the absent siblings would reject
+        # the CLI's own `standard` profile on a perfectly correct response.
+        records = [
+            {
+                "customFields": [
+                    {"name": "Priority", "value": {"name": "Major", "id": "1"}},
+                    {"name": "Assignee", "value": None},
+                ]
+            }
+        ]
+        expression = "customFields(name,value(name,id,login,fullName,text,presentation))"
+        assert find_missing_fields(expression, records) == []
+
+    def test_a_text_valued_field_is_not_a_missing_field(self):
+        # The false rejection that would have broken the spec gate. A text custom field asked for
+        # `value(name,id)` answers `{"text": ...}`: the requested subfield does not apply to that
+        # field's type, which is not a dropped field. The gate's own expression is `value(name)`.
+        records = [{"customFields": [{"name": "Due date", "value": {"text": "2026-01-01"}}]}]
+        assert find_missing_fields("customFields(name,value(name))", records) == []
+        assert find_missing_fields("customFields(name,value(name,id))", records) == []
+
+    def test_a_user_valued_field_is_not_a_missing_field(self):
+        records = [{"customFields": [{"name": "Assignee", "value": {"login": "u", "fullName": "U"}}]}]
+        assert find_missing_fields("customFields(name,value(name,id))", records) == []
+
+    def test_an_object_returning_nothing_is_not_a_missing_field(self):
+        # `{}` carries no keys at all, so there is nothing there to have been dropped — which is
+        # different from an object carrying only `$type`, the API's stripped-response signature.
+        assert find_missing_fields("idReadable,reporter(login)", [{"idReadable": "V", "reporter": {}}]) == []
+
+    def test_a_nested_subfield_is_not_reported_even_when_it_came_back_empty(self):
+        # The design limit, pinned with the reason, because a reviewer will otherwise read it as a
+        # bug. The API answers by returning *only what it was asked for*, so a nested subfield that
+        # does not apply to a field's type is byte-for-byte identical to a misspelled one: a text
+        # custom field asked for `value(name)` returns `{"$type": "TextFieldValue"}` and a value
+        # asked for `value(bogus)` returns `{"$type": ...}`. Nothing separates them.
+        text_field = [{"customFields": [{"name": "Due date", "value": {"$type": "TextFieldValue"}}]}]
+        assert find_missing_fields("customFields(name,value(name))", text_field) == []
+        assert find_missing_fields("customFields(name,value(bogus))", text_field) == []
+
+    def test_a_documented_field_that_is_empty_is_not_reported(self):
+        # `parentIssueLink` is a real field, absent from every issue in a project where nothing is
+        # a sub-task. Refusing it breaks a read that worked, which is the one failure that must not
+        # happen, and an absent value is indistinguishable from an unknown name in a response.
+        assert find_missing_fields("idReadable,parentIssueLink", [{"idReadable": "V"}]) == []
+        assert find_missing_fields("idReadable,assignee(login)", [{"idReadable": "V"}]) == []
+
+    def test_a_misspelling_of_a_field_that_arrived_is_reported(self):
+        # The near-miss rule needs no schema: `idReadble` beside a returned `idReadable` is a typo
+        # whatever the entity actually has, so it is reported.
+        records = [{"idReadable": "V", "summary": "s"}]
+        assert find_missing_fields("idReadble,summary", records) == ["idReadble"]
+        assert find_missing_fields("idReadabl,summary", records) == ["idReadabl"]
+
+    def test_a_request_where_nothing_came_back_is_reported(self):
+        # Every requested name absent means the expression is wrong, not that the values are empty.
+        # This is the one-name case, where there is no neighbour to compare against.
+        assert find_missing_fields("idReadble", [{"summary": "s"}]) == ["idReadble"]
+
+    def test_an_invented_name_with_no_near_neighbour_is_not_reported(self):
+        # The accepted cost, stated rather than hidden. `notAField` beside `summary` is too far
+        # from anything that arrived to call a misspelling, and guessing from a schema is what
+        # made two earlier designs unsound. The name is dropped, as it was before this check.
+        assert find_missing_fields("idReadable,notAField", [{"idReadable": "V"}]) == []
+
+    def test_a_name_present_in_any_record_counts_as_returned(self):
+        # Aggregation, not per-record: a field that is empty on one issue but set on another is
+        # present, and must not be reported.
+        records = [{"idReadable": "V", "resolved": None}, {"idReadable": "W", "resolved": "2026-01-01"}]
+        assert find_missing_fields("idReadable,resolved", records) == []
+
+    def test_a_null_value_is_an_empty_answer_not_a_dropped_field(self):
+        records = [{"customFields": [{"name": "Assignee", "value": None}]}]
+        assert find_missing_fields("customFields(name,value(name,id))", records) == []
+
+    def test_an_empty_collection_is_an_empty_answer_not_a_dropped_field(self):
+        # An untagged issue legitimately returns `tags: []`.
+        assert find_missing_fields("tags(name)", [{"tags": []}]) == []
+
+    def test_a_collection_of_non_objects_asserts_nothing(self):
+        # A list that carries no objects has no keys to check either way, so it must not be
+        # reported — the same reasoning as an empty collection.
+        assert find_missing_fields("tags(name)", [{"tags": ["a", "b"]}]) == []
+
+    def test_a_scalar_carrying_no_keys_is_not_a_missing_field(self):
+        assert find_missing_fields("resolved", [{"resolved": None, "idReadable": "V"}]) == []
+
+    def test_no_records_is_an_empty_result_not_a_bad_expression(self):
+        # Nothing came back, so there is nothing to compare against; the caller reports emptiness.
+        assert find_missing_fields("idReadable", []) == []
+
+    def test_accepts_a_single_record(self):
+        assert find_missing_fields("idReadable", {"idReadable": "VAN-1"}) == []
+        assert find_missing_fields("idReadble", {"idReadable": "VAN-1"}) == ["idReadble"]
+
+    def test_empty_expression_reports_nothing(self):
+        assert find_missing_fields("", [{"summary": "s"}]) == []
+        assert find_missing_fields("   ", [{"summary": "s"}]) == []
+
+    def test_the_gate_expression_validates_against_a_gate_shaped_payload(self):
+        expression = "id,idReadable,summary,resolved,description,customFields(name,value(name)),tags(name),links(direction,linkType(name),issues(idReadable))"
+        records = [
+            {
+                "id": "3-70",
+                "idReadable": "VAN-1",
+                "summary": "s",
+                "resolved": None,
+                "description": "d",
+                "customFields": [{"name": "Priority", "value": {"name": "Major"}}],
+                "tags": [{"name": "lane-root"}],
+                "links": [
+                    {
+                        "direction": "OUTWARD",
+                        "linkType": {"name": "Depend"},
+                        "issues": [{"idReadable": "VAN-2"}],
+                    }
+                ],
+            }
+        ]
+        assert find_missing_fields(expression, records) == []

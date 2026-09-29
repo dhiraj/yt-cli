@@ -193,6 +193,56 @@ class TestIssueManagerRetrieval:
         assert issue_manager.issue_service.search_issues.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_search_issues_flags_a_cap_that_hid_more(self, issue_manager):
+        """A cap that filled its last page means more matched, and `count` is not the total.
+
+        `yt ls` passes `--limit` straight through as `top`, so without this the command printed
+        the cap as `Total: 50 issues` when 59 matched — a count that reads as an answer.
+        """
+        page = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(50)]}
+        issue_manager.issue_service.search_issues = AsyncMock(return_value=page)
+
+        result = await issue_manager.search_issues("", top=50, page_size=100, format_output="json")
+
+        assert result["count"] == 50
+        assert result["truncated"] is True
+        assert result["truncated_at"] == 50
+
+    @pytest.mark.asyncio
+    async def test_search_issues_does_not_flag_an_exhausted_result(self, issue_manager):
+        """A short page means the result really was that size, so nothing is flagged."""
+        short = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(30)]}
+        issue_manager.issue_service.search_issues = AsyncMock(return_value=short)
+
+        result = await issue_manager.search_issues("", top=50, page_size=100, format_output="json")
+
+        assert result["count"] == 30
+        assert "truncated" not in result
+
+    @pytest.mark.asyncio
+    async def test_search_issues_does_not_flag_an_uncapped_result(self, issue_manager):
+        """With no cap the loop only ever ends on a short page, so nothing is flagged."""
+        page1 = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100)]}
+        page2 = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100, 130)]}
+        issue_manager.issue_service.search_issues = AsyncMock(side_effect=[page1, page2])
+
+        result = await issue_manager.search_issues("", page_size=100, format_output="json")
+
+        assert result["count"] == 130
+        assert "truncated" not in result
+
+    @pytest.mark.asyncio
+    async def test_search_issues_flags_a_max_results_cap_too(self, issue_manager):
+        """`--max-results` is the other cap, and it hides more in exactly the same way."""
+        page = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100)]}
+        issue_manager.issue_service.search_issues = AsyncMock(return_value=page)
+
+        result = await issue_manager.search_issues("", max_results=100, page_size=100, format_output="json")
+
+        assert result["truncated"] is True
+        assert result["truncated_at"] == 100
+
+    @pytest.mark.asyncio
     async def test_stream_list_issues_yields_across_pages(self, issue_manager):
         """#727: streaming yields issues one at a time across bounded pages without
         buffering the whole result set."""
@@ -1105,3 +1155,48 @@ class TestIssueManagerCustomFieldValidation:
             assert result["valid"] is True
             assert result["message"] == ""
             mock_logger.error.assert_called_once()
+
+
+class TestIncompleteFetchIsFlagged:
+    """A failed page is as incomplete as a cap, and `count` is as misleading either way.
+
+    `Total: N issues` after a partial fetch reads as a total and is not one — the same defect as
+    printing a cap, reached by a different route.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_failed_page_after_a_good_one_is_flagged(self, issue_manager):
+        good = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100)]}
+        bad = {"status": "error", "message": "gateway timeout"}
+        issue_manager.issue_service.search_issues = AsyncMock(side_effect=[good, bad])
+
+        result = await issue_manager.search_issues("", page_size=100, format_output="json")
+
+        # The pages already collected are kept rather than lost to a late failure.
+        assert result["status"] == "success"
+        assert result["count"] == 100
+        assert result["incomplete"] is True
+        assert "did not return" in result["incomplete_reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_with_nothing_collected_still_surfaces_as_an_error(self, issue_manager):
+        bad = {"status": "error", "message": "gateway timeout"}
+        issue_manager.issue_service.search_issues = AsyncMock(return_value=bad)
+
+        result = await issue_manager.search_issues("", page_size=100, format_output="json")
+
+        # Nothing to keep, so this is the error itself rather than a partial success.
+        assert result["status"] == "error"
+        assert "incomplete" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_clean_paged_read_is_not_flagged(self, issue_manager):
+        page1 = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100)]}
+        page2 = {"status": "success", "data": [{"idReadable": f"P-{i}"} for i in range(100, 120)]}
+        issue_manager.issue_service.search_issues = AsyncMock(side_effect=[page1, page2])
+
+        result = await issue_manager.search_issues("", page_size=100, format_output="json")
+
+        assert result["count"] == 120
+        assert "incomplete" not in result
+        assert "truncated" not in result

@@ -15,6 +15,7 @@ import click
 from ..auth import AuthManager
 from ..cli_utils import AliasedGroup, validate_issue_id_format, validate_project_id_format
 from ..console import get_console, print_status
+from ..field_selection import find_missing_fields
 
 
 def _format_issues_as_csv(issues):
@@ -234,6 +235,77 @@ def _parse_custom_fields(custom_field_tuples: tuple) -> dict:
             raise click.BadParameter(f"Field name and value cannot be empty: {field_spec}")
         parsed[name] = value
     return parsed
+
+
+def _report_truncation(result: dict, output_format: str) -> None:
+    """Say so when a read is not the whole result set, on every renderer that can be short.
+
+    `issues list` and `issues search` share one manager, so they share one number — and a fix
+    applied to only one of them leaves the other printing a cap as though it were a total. Two
+    ways to be short: a cap stopped the fetch, or a page failed part-way. Both go to stderr for
+    json/csv so a piped payload stays parseable.
+    """
+    if result.get("truncated"):
+        print_status(
+            f"⚠️  Truncated: showing {result['count']} issues, but more match — the fetch stopped "
+            f"at a cap of {result.get('truncated_at')}.",
+            output_format=output_format,
+            style="yellow",
+        )
+        print_status(
+            "   Raise or drop the limit (`--limit N`, or use `yt issues list`, which pages to "
+            "exhaustion) before counting these results.",
+            output_format=output_format,
+            style="dim",
+        )
+    if result.get("incomplete"):
+        print_status(
+            f"⚠️  Incomplete: showing {result['count']} issues, but {result.get('incomplete_reason')}. "
+            "Issues beyond that page were not read.",
+            output_format=output_format,
+            style="yellow",
+        )
+
+
+def _reject_dropped_fields(expression: str | None, records, output_format: str) -> None:
+    """Fail the command when a requested field name came back from nowhere.
+
+    The API treats an unknown field name as absent rather than as an error: the request succeeds,
+    the unknown term is simply not in the response, and the exit code is 0. A caller asking for
+    `idReadable` can therefore be handed a payload with no issue id in it and no way to know —
+    the same class of failure as a create that drops a tag, so it is refused the same way: by
+    name, non-zero exit.
+
+    Covers a `--fields` expression *and* a `--profile`. Both used to be silent about this: the
+    profiles carried four names (`state`, `priority`, `type`, `assignee`) that the API drops in
+    every spelling, so every profile-based read had been quietly returning less than it asked for.
+    """
+    if not expression:
+        return
+    missing = find_missing_fields(expression, records)
+    if not missing:
+        return
+
+    # `print_status` routes to stderr for json/csv, so the reason never lands in the middle of a
+    # payload a caller is piping into a parser.
+    print_status(
+        f"❌ You asked for {', '.join(missing)} and the API returned no such field.",
+        output_format=output_format,
+        style="red",
+    )
+    print_status(
+        "   The request succeeded — YouTrack drops a field name it does not recognise instead of "
+        "failing it — so the result would have been silently incomplete.",
+        output_format=output_format,
+        style="dim",
+    )
+    print_status(
+        "   These are misspelled or are not fields of this entity. A name that is merely *empty* is "
+        "not reported, because an absent value and an unknown name look identical in a response.",
+        output_format=output_format,
+        style="dim",
+    )
+    raise click.ClickException(f"requested field(s) the API does not return: {', '.join(missing)}")
 
 
 def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> bool:
@@ -643,6 +715,11 @@ def list_issues(
             # fetch uses bounded memory and can be piped incrementally (#727).
             import json
 
+            # `--fields` is deliberately NOT verified on this path. A stream that has already
+            # emitted lines cannot un-emit them, so failing part-way would hand the caller a
+            # truncated file that looks like a complete one — the exact failure this check
+            # exists to prevent. A *trailing* note costs nothing, though, so the truncation
+            # warning is still reported once the stream finishes.
             async def _stream_ndjson() -> int:
                 count = 0
                 async for issue in issue_manager.stream_list_issues(
@@ -661,6 +738,20 @@ def list_issues(
                 return count
 
             emitted = asyncio.run(_stream_ndjson())
+            # The same precedence the manager uses to pick its cap, so a stream stopped by either
+            # flag is reported and not just `--top`.
+            stream_cap = top if top is not None else max_results
+            if stream_cap is not None and emitted >= stream_cap:
+                # Unlike the buffered paths, a stream *cannot* tell whether the cap hid anything:
+                # it stops at the cap either way, so `emitted == cap` is ambiguous between "that
+                # was all of them" and "there are more". The note therefore states the cap as
+                # reached, not as a claim that more exist.
+                print_status(
+                    f"⚠️  Reached the cap of {stream_cap} issues ({emitted} streamed). If that cap "
+                    "was reached rather than exhausted, more match and were not fetched.",
+                    output_format=format,
+                    style="yellow",
+                )
             print_status(f"Streamed {emitted} issues", output_format=format, style="dim")
             return
 
@@ -684,6 +775,15 @@ def list_issues(
         if result["status"] == "success":
             issues = result["data"]
 
+            # YouTrack drops an unknown field from the response instead of failing the request,
+            # so a typo in `--fields` used to print a short payload, exit 0, and say nothing —
+            # leaving the caller unable to tell a dropped field from a short answer. Refuse it
+            # here, before anything is rendered as though it were the whole result.
+            # Verify against what was *sent* (a profile is expanded in the manager), so a
+            # profile naming a field the API drops is caught exactly like a user's typo.
+            _reject_dropped_fields(result.get("requested_fields") or fields, issues, format)
+            _report_truncation(result, format)
+
             if format == "table":
                 if paginated:
                     # Use interactive pagination
@@ -693,7 +793,10 @@ def list_issues(
                 else:
                     # Use traditional table display
                     issue_manager.display_issues_table(issues)
-                    console.print(f"\n[dim]Total: {result['count']} issues[/dim]")
+                    if result.get("truncated") or result.get("incomplete"):
+                        console.print(f"\n[dim]Showing {result['count']} issues (not the whole set)[/dim]")
+                    else:
+                        console.print(f"\n[dim]Total: {result['count']} issues[/dim]")
 
                     # Display pagination info if available
                     if "pagination" in result:
@@ -716,11 +819,17 @@ def list_issues(
 
                 click.echo(json.dumps(issues, indent=2))
         else:
-            console.print(f"❌ {result['message']}", style="red")
+            print_status(f"❌ {result['message']}", output_format=format, style="red")
             raise click.ClickException("Failed to list issues")
 
+    except click.ClickException:
+        # Already reported in the caller's own words (and, for a machine format, already on
+        # stderr). Re-wrapping it here would print the reason twice and lose it from stdout.
+        raise
     except Exception as e:
-        console.print(f"❌ Error listing issues: {e}", style="red")
+        # stderr for json/csv: on stdout this line would be the *only* thing a caller piping the
+        # output sees, turning a clean failure into an unparseable stream.
+        print_status(f"❌ Error listing issues: {e}", output_format=format, style="red")
         raise click.ClickException("Failed to list issues") from e
 
 
@@ -804,7 +913,6 @@ def update(
             else:
                 console.print(f"❌ {result['message']}", style="red")
                 raise click.ClickException("Failed to get issue details")
-
         except Exception as e:
             console.print(f"❌ Error getting issue details: {e}", style="red")
             raise click.ClickException("Failed to get issue details") from e
@@ -1010,9 +1118,17 @@ def search(
         if result["status"] == "success":
             issues = result["data"]
 
+            # Verify against what was *sent* (a profile is expanded in the manager), so a
+            # profile naming a field the API drops is caught exactly like a user's typo.
+            _reject_dropped_fields(result.get("requested_fields") or fields, issues, format)
+            _report_truncation(result, format)
+
             if format == "table":
                 issue_manager.display_issues_table(issues)
-                console.print(f"\n[dim]Found: {result['count']} issues[/dim]")
+                if result.get("truncated") or result.get("incomplete"):
+                    console.print(f"\n[dim]Showing {result['count']} issues (not the whole set)[/dim]")
+                else:
+                    console.print(f"\n[dim]Found: {result['count']} issues[/dim]")
 
                 # Display pagination info if available
                 if "pagination" in result:
@@ -1029,11 +1145,15 @@ def search(
 
                 click.echo(json.dumps(issues, indent=2))
         else:
-            console.print(f"❌ {result['message']}", style="red")
+            print_status(f"❌ {result['message']}", output_format=format, style="red")
             raise click.ClickException("Failed to search issues")
 
+    except click.ClickException:
+        # Already reported in the caller's own words, and already on stderr for a machine
+        # format; re-wrapping would print the reason twice and lose it from stdout.
+        raise
     except Exception as e:
-        console.print(f"❌ Error searching issues: {e}", style="red")
+        print_status(f"❌ Error searching issues: {e}", output_format=format, style="red")
         raise click.ClickException("Failed to search issues") from e
 
 
@@ -1891,32 +2011,43 @@ def types(ctx: click.Context, format: str) -> None:
 @click.argument("issue_id")
 @click.option(
     "--format",
-    type=click.Choice(["table", "panel"], case_sensitive=False),
+    type=click.Choice(["table", "panel", "json"], case_sensitive=False),
     default="table",
-    help="Output format for issue details (table or panel)",
+    help="Output format for issue details (table, panel or json)",
 )
 @click.pass_context
 def show(ctx: click.Context, issue_id: str, format: str) -> None:
     """Show detailed information about an issue."""
     from ..managers.issues import IssueManager
 
-    console = get_console()
     auth_manager = AuthManager(ctx.obj.get("config"))
     issue_manager = IssueManager(auth_manager)
 
-    console.print(f"📋 Fetching issue '{issue_id}' details...", style="blue")
+    # stderr for json, so a piped payload is the only thing on stdout.
+    print_status(f"📋 Fetching issue '{issue_id}' details...", output_format=format)
 
     try:
         result = asyncio.run(issue_manager.get_issue(issue_id))
 
         if result["status"] == "success":
-            issue_manager.display_issue_details(result["data"], format_type=format)
+            if format == "json":
+                # `click.echo`, not `console.print`: Rich would parse the payload as markup and
+                # silently eat a `[tag]` in a summary (issue #756).
+                import json
+
+                click.echo(json.dumps(result["data"], indent=2))
+            else:
+                issue_manager.display_issue_details(result["data"], format_type=format)
         else:
-            console.print(f"❌ {result['message']}", style="red")
+            print_status(f"❌ {result['message']}", output_format=format, style="red")
             raise click.ClickException("Failed to get issue details")
 
+    except click.ClickException:
+        # Already reported by the branch above; re-wrapping would print the reason twice and put
+        # one copy on stdout, where a piped `--format json` payload is expected.
+        raise
     except Exception as e:
-        console.print(f"❌ Error getting issue details: {e}", style="red")
+        print_status(f"❌ Error getting issue details: {e}", output_format=format, style="red")
         raise click.ClickException("Failed to get issue details") from e
 
 

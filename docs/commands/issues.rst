@@ -423,6 +423,131 @@ Benchmark field selection performance improvements to measure API optimization b
    understand the performance impact of different field selection strategies
    when working with large datasets.
 
+Reading Issues Reliably
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Two things can make a read look complete when it is not. Both are reported rather
+than passed off as an answer.
+
+A field name YouTrack does not know
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The API treats an unknown field name as *absent* rather than as an error: the
+request succeeds, the unknown term is simply left out of the response, and the
+exit status is 0. So a single mistyped character produces a short payload that
+looks like a successful read::
+
+   $ yt issues list -p PROJ --format json --fields 'idReadble,summary'
+   ❌ The API did not return these fields you asked for: idReadble
+      The request succeeded — YouTrack drops an unknown field name instead of
+      failing it — so the result would have been silently incomplete.
+      Check the spelling, or run `yt projects fields <PROJECT>` to see a field's
+      real name.
+   $ echo $?
+   1
+
+A requested name is reported only when the response gives **positive evidence**
+against it, from one of two signals:
+
+* **Nothing requested came back at all.** A request whose every name is absent is
+  not a request that happened to be empty; the whole expression is wrong.
+* **It is a near-miss for a name that did come back** — within two characters.
+  ``idReadble`` beside a returned ``idReadable`` is a typo whatever the schema
+  says, so it is reported without needing to know what the entity has::
+
+     $ yt issues list -p PROJ --format json --fields 'idReadble,idReadable,summary'
+     ❌ You asked for idReadble and the API returned no such field.
+        The request succeeded — YouTrack drops a field name it does not recognise
+        instead of failing it — so the result would have been silently incomplete.
+        These are misspelled or are not fields of this entity. A name that is merely
+        *empty* is not reported, because an absent value and an unknown name look
+        identical in a response.
+
+**What this does not catch, and why.** A misspelled name whose correct spelling
+was *not* also requested has no neighbour in the response to be compared against:
+``--fields 'idReadble,summary'`` returns a payload with no issue id in it, and the
+check stays silent. There is no way round that without a list of valid field names,
+and a hand-maintained list is a copy that goes stale — an earlier version of this
+check used one, and it failed in the opposite direction, accepting names the server
+rejects. A copy of the schema is a second thing to keep correct, and a false
+refusal breaks a command that was working.
+
+So **check the keys you asked for are in the first record** rather than relying on
+this to have caught it. The check earns its keep on the two cases above, not as a
+general schema validator.
+
+Nested subfields are never reported, and that is a hard limit. The API answers by
+returning *only what it was asked for*, so a nested subfield that does not apply
+to a field's type is byte-for-byte identical to one that was misspelled: a text
+custom field asked for ``value(name)`` returns ``{"$type": "TextFieldValue"}`` and
+a value asked for ``value(bogus)`` returns ``{"$type": ...}``. Nothing separates
+them.
+
+``--profile`` is checked on the same path, which matters because the profiles are
+field lists like any other. They used to name ``state``, ``priority`` and ``type``,
+which are not top-level issue fields at all — verified on a project where every
+issue carries all three inside ``customFields``, so their absence proves the point
+rather than suggesting it. Those values remain available through ``customFields``,
+which ``standard`` and ``full`` expand.
+
+One issue as JSON
+^^^^^^^^^^^^^^^^^
+
+``yt issues show`` takes ``--format json``, so the command that names an issue
+can also return one as data:
+
+.. code-block:: bash
+
+   yt issues show PROJ-123 --format json
+
+The payload carries ``idReadable`` — the only stable public name for an issue —
+along with the summary, description, project, timestamps, tags and links, and each
+link carries its ``linkType`` **name**. Workflow state, priority and type are
+*not* top-level fields: they appear inside ``customFields``, because the API drops
+them when asked for directly. Progress output goes to standard error, so the
+payload on standard output is safe to pipe straight into a parser.
+
+``--format ndjson`` skips the check, because a stream that has already emitted
+lines cannot un-emit them — failing part-way would hand back a truncated file
+that looks complete. Use ``json`` or ``csv`` when the expression needs verifying.
+
+A cap is not a total
+^^^^^^^^^^^^^^^^^^^^
+
+``--top``, ``--max-results`` and ``yt ls --limit`` stop the fetch where they say
+they do. When that happens the command says so instead of printing the cap as the
+size of the result set::
+
+   $ yt issues list -p PROJ --top 50
+   ⚠️  Truncated: showing 50 issues, but more match — the fetch stopped at a cap of 50.
+      Raise or drop the limit (`--limit N`, or use `yt issues list`, which pages to
+      exhaustion) before counting these results.
+   Showing 50 issues (not the whole set)
+
+A page that **fails** part-way is reported the same way, and for the same reason:
+the issues already read are kept rather than discarded, which means ``count`` is a
+count of what survived rather than of what matched::
+
+   ⚠️  Incomplete: showing 100 issues, but the fetch failed part-way (page at
+      skip=100 did not return). Issues beyond that page were not read.
+
+The warnings go to standard error for ``json`` and ``csv``, so a piped payload
+stays parseable. A read that ran to completion prints the unqualified
+``Total: N issues`` / ``Found: N issues`` line; either warning replaces it with a
+``Showing N issues (not the whole set)`` line instead, so the number is never
+presented as the size of the result set.
+
+``--format ndjson`` gets a differently-worded note, because a stream *cannot* tell
+whether a cap hid anything — it stops at the cap whether or not more matched::
+
+   ⚠️  Reached the cap of 100 issues (100 streamed). If that cap was reached
+      rather than exhausted, more match and were not fetched.
+
+It is worded as a possibility rather than a claim because at the boundary the two
+cases are indistinguishable, and asserting "more match" would be wrong whenever the
+count happened to equal the cap exactly. The ``--fields`` check is skipped for
+``ndjson`` altogether: a stream that has already emitted lines cannot un-emit them.
+
 Comment Management
 ------------------
 

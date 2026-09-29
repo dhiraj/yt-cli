@@ -11,6 +11,8 @@ from typing import Any
 import structlog
 from rich.logging import RichHandler
 
+from .console import get_error_console
+
 __all__ = [
     "SensitiveDataFilter",
     "setup_logging",
@@ -109,7 +111,17 @@ def _setup_file_logging(log_level: int) -> logging.handlers.RotatingFileHandler:
 
 def _setup_console_logging(log_level: int) -> RichHandler:
     """Set up console-based logging with rich formatting."""
-    console_handler = RichHandler(rich_tracebacks=True, show_path=False, show_time=True, show_level=True)
+    # stderr, not Rich's default stdout: a log record is diagnostics, and on stdout it lands in
+    # the middle of a `--format json` payload, so `… | jq` sees prose where data was promised.
+    # `print_status` already routes status text to stderr for machine formats; this keeps the log
+    # records to the same rule rather than inventing a second one.
+    console_handler = RichHandler(
+        console=get_error_console(),
+        rich_tracebacks=True,
+        show_path=False,
+        show_time=True,
+        show_level=True,
+    )
     console_handler.setLevel(log_level)
 
     # Add sensitive data filter

@@ -1386,6 +1386,132 @@ class TestIssuesCLI:
             assert result.exit_code == 0
             assert "fetching issues" in result.output.lower()
 
+    def test_issues_list_rejects_a_field_the_api_did_not_return(self):
+        """A misspelled `--fields` fails the command instead of printing a short payload.
+
+        YouTrack answers 200 and simply omits a field it does not know, so
+        `--fields idReadble,summary` used to exit 0 with no `idReadable` in the output and nothing
+        to indicate a field had been dropped. A caller then cannot tell a dropped field from a
+        short answer — and cannot name the issue it just read.
+        """
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            # `summary` arrives, so the misspelled `idReadble` has a near neighbour to be caught
+            # against; see the near-miss rule in field_selection.find_missing_fields.
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"idReadable": "PROJ-1", "summary": "Test", "$type": "Issue"}],
+                "count": 1,
+            }
+
+            result = runner.invoke(
+                main,
+                ["issues", "list", "-p", "PROJ", "--format", "json", "--fields", "idReadble,idReadable,summary"],
+            )
+
+        assert result.exit_code != 0
+        # The name has to be in the message — a bare non-zero exit sends the reader hunting.
+        assert "idReadble" in result.stderr
+        # And stdout must stay empty, or a caller piping it gets an unparseable stream.
+        assert result.stdout.strip() == ""
+
+    def test_issues_list_reports_nothing_when_every_field_arrived(self):
+        """The check must not fire on a correct response, including a nested expression."""
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        expression = "idReadable,customFields(name,value(name,id)),links(direction,linkType(name),issues(idReadable))"
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [
+                    {
+                        "idReadable": "PROJ-1",
+                        "customFields": [{"name": "Priority", "value": {"name": "Major", "id": "1"}}],
+                        "links": [
+                            {
+                                "direction": "OUTWARD",
+                                "linkType": {"name": "Depend"},
+                                "issues": [{"idReadable": "PROJ-2"}],
+                            }
+                        ],
+                    }
+                ],
+                "count": 1,
+            }
+
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ", "--format", "json", "--fields", expression])
+
+        assert result.exit_code == 0
+        assert "PROJ-1" in result.stdout
+
+    def test_issues_list_does_not_print_a_cap_as_a_total(self):
+        """A truncated fetch must not render its cap as `Total: N issues`.
+
+        `yt ls --limit 50` over 59 matches used to print `Total: 50 issues`, which reads as an
+        answer. It now says how many were shown, that more match, and how to lift the cap.
+        """
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"idReadable": f"PROJ-{i}", "summary": "s"} for i in range(50)],
+                "count": 50,
+                "truncated": True,
+                "truncated_at": 50,
+            }
+
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ", "--max-results", "50"])
+
+        assert result.exit_code == 0
+        assert "Total: 50 issues" not in result.output
+        assert "more match" in result.output
+        assert "50" in result.output
+
+    def test_issues_list_prints_a_total_when_nothing_was_hidden(self):
+        """The ordinary case keeps its exact `Total:` line — this only changes a capped read."""
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"idReadable": "PROJ-1", "summary": "s"}],
+                "count": 1,
+            }
+
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ"])
+
+        assert result.exit_code == 0
+        assert "Total: 1 issues" in result.output
+        assert "more match" not in result.output
+
+    def test_issues_list_does_not_check_a_profile(self):
+        """Only an explicit `--fields` is the caller's to have got wrong."""
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            # A response that would fail an explicit check: no field the caller named, because
+            # they named none. A profile is the CLI's own contract, checked where it is defined.
+            mock_run.return_value = {"status": "success", "data": [{"idReadable": "PROJ-1"}], "count": 1}
+
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ", "--format", "json", "--profile", "minimal"])
+
+        assert result.exit_code == 0
+
     def test_issues_list_json_does_not_pollute_stdout(self):
         """`issues list --format json` keeps status off stdout (issue #648)."""
         from youtrack_cli.main import main
@@ -2122,3 +2248,275 @@ class TestCreateAppliesTagsAndNamesTheIssue:
         printed = " ".join(str(c) for c in console.print.call_args_list)
         assert "PROJ-9" in printed
         assert "nope" in printed
+
+
+class TestIssuesShowJSON:
+    """`yt issues show VAN-1 --format json` — the natural spelling for one issue as data.
+
+    It did not exist: `show` was `[table|panel]` only, so a caller wanting one issue as data had
+    to reach for `yt issues search "VAN-1" --format json` instead. That worked, but only by
+    accident — nothing about the command that names an issue could return one.
+    """
+
+    def _issue(self):
+        return {
+            "id": "3-70",
+            "idReadable": "VAN-1",
+            "summary": "A summary with [brackets] in it",
+            "description": "d",
+            "customFields": [{"name": "State", "value": {"name": "In Progress"}}],
+        }
+
+    def test_show_json_prints_the_issue(self):
+        import json as json_mod
+
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {"status": "success", "data": self._issue()}
+            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+
+        assert result.exit_code == 0
+        assert json_mod.loads(result.stdout)["idReadable"] == "VAN-1"
+
+    def test_show_json_keeps_status_off_stdout(self):
+        """The progress line must not land in the middle of a payload someone is piping."""
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {"status": "success", "data": self._issue()}
+            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+
+        assert "fetching issue" not in result.stdout.lower()
+        assert "fetching issue" in result.stderr.lower()
+
+    def test_show_json_preserves_bracketed_text_verbatim(self):
+        """Regression guard for #756: Rich would parse `[brackets]` as markup and eat it.
+
+        `click.echo` bypasses Rich, so a summary containing markup survives into the JSON.
+        """
+        import json as json_mod
+
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {"status": "success", "data": self._issue()}
+            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+
+        assert json_mod.loads(result.stdout)["summary"] == "A summary with [brackets] in it"
+
+    def test_show_table_still_renders(self):
+        """The new option is additive; the existing renderers are untouched."""
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with (
+            patch("youtrack_cli.main.asyncio.run") as mock_run,
+            patch("youtrack_cli.managers.issues.IssueManager.display_issue_details") as mock_display,
+        ):
+            mock_run.return_value = {"status": "success", "data": self._issue()}
+            result = runner.invoke(main, ["issues", "show", "VAN-1"])
+
+        assert result.exit_code == 0
+        mock_display.assert_called_once()
+
+
+class TestTruncationReporting:
+    """A cap is not a total, on every renderer that can be capped.
+
+    `issues list` and `issues search` share one manager and therefore one number, so a fix applied
+    to only one of them leaves the other printing `Found: 50 issues` when 290 matched.
+    """
+
+    def _capped(self):
+        return {
+            "status": "success",
+            "data": [{"idReadable": f"PROJ-{i}", "summary": "s"} for i in range(50)],
+            "count": 50,
+            "truncated": True,
+            "truncated_at": 50,
+        }
+
+    def test_search_does_not_print_a_cap_as_a_total(self):
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = self._capped()
+            result = runner.invoke(main, ["issues", "search", "project: PROJ", "--top", "50"])
+
+        assert result.exit_code == 0
+        assert "Found: 50 issues" not in result.output
+        # The table renderer is the human view, so the note is part of that output. The json case
+        # below is the one that has to keep it off stdout.
+        assert "more match" in result.output
+
+    def test_search_still_prints_found_when_nothing_was_hidden(self):
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"idReadable": "PROJ-1", "summary": "s"}],
+                "count": 1,
+            }
+            result = runner.invoke(main, ["issues", "search", "project: PROJ"])
+
+        assert result.exit_code == 0
+        assert "Found: 1 issues" in result.output
+
+    def test_a_json_capped_search_keeps_stdout_parseable(self):
+        import json as json_mod
+
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = self._capped()
+            result = runner.invoke(main, ["issues", "search", "project: PROJ", "--format", "json", "--top", "50"])
+
+        assert result.exit_code == 0
+        assert len(json_mod.loads(result.stdout)) == 50
+        assert "Truncated" in result.stderr
+
+
+class TestStdoutStaysCleanOnError:
+    """An error message is diagnostics, not data — it must not land in a piped payload.
+
+    `print_status` already routes status text to stderr for json/csv; these are the read commands
+    that offer a machine format, and each of them used to print its failure to stdout.
+    """
+
+    def test_list_json_failure_leaves_stdout_empty(self):
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {"status": "error", "message": "Project not found"}
+            result = runner.invoke(main, ["issues", "list", "-p", "NOPE", "--format", "json"])
+
+        assert result.exit_code != 0
+        assert result.stdout.strip() == ""
+        assert "Project not found" in result.stderr
+
+    def test_show_json_failure_leaves_stdout_empty(self):
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {"status": "error", "message": "Issue not found"}
+            result = runner.invoke(main, ["issues", "show", "VAN-999999", "--format", "json"])
+
+        assert result.exit_code != 0
+        assert result.stdout.strip() == ""
+        assert "Issue not found" in result.stderr
+
+
+class TestProfileFieldsAreVerifiedToo:
+    """A `--profile` is a field list like any other, and the API drops names in it just as surely.
+
+    The issues profiles carried `state`, `priority`, `type` and `assignee` — none of which are
+    top-level issue fields, so all four were dropped by the API and never arrived. Every
+    profile-based read had been quietly returning less than it asked for, and the dropped-field
+    check exempting `--profile` is what let it pass unnoticed.
+    """
+
+    def test_a_profile_is_checked_like_an_expression(self):
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+
+        # A response missing a field the profile asked for must be refused, not passed on.
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"id": "3-1", "idReadable": "PROJ-1", "summary": "s", "numberInProject": 1}],
+                "count": 1,
+                # `summry` sits one character from the `summary` that came back.
+                "requested_fields": "id,idReadable,numberInProject,summary,summry",
+            }
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ", "--format", "json", "--profile", "minimal"])
+
+        assert result.exit_code != 0
+        assert "summry" in result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_a_correct_profile_response_passes(self):
+        import json as json_mod
+
+        from youtrack_cli.main import main
+
+        runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = {
+                "status": "success",
+                "data": [{"id": "3-1", "idReadable": "PROJ-1", "summary": "s", "numberInProject": 1}],
+                "count": 1,
+                "requested_fields": "id,idReadable,numberInProject,summary",
+            }
+            result = runner.invoke(main, ["issues", "list", "-p", "PROJ", "--format", "json", "--profile", "minimal"])
+
+        assert result.exit_code == 0
+        assert json_mod.loads(result.stdout)[0]["idReadable"] == "PROJ-1"
+
+
+class TestNDJSONReportsACap:
+    """A trailing note costs nothing even though a mid-stream failure would.
+
+    Unlike the buffered paths, a stream cannot tell whether the cap hid anything — it stops at the
+    cap either way — so the note states the cap as reached rather than claiming more exist.
+    """
+
+    def _run(self, argv):
+        from youtrack_cli.main import main
+
+        try:
+            runner = CliRunner(mix_stderr=False)
+        except TypeError:
+            runner = CliRunner()
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.return_value = 100
+            return runner.invoke(main, ["issues", "list", "-p", "PROJ", "--format", "ndjson", *argv])
+
+    def test_a_capped_stream_reports_the_cap(self):
+        result = self._run(["--top", "100"])
+        assert result.exit_code == 0
+        assert "Reached the cap of 100" in result.stderr
+
+    def test_max_results_caps_the_stream_too(self):
+        # The manager's precedence is `top` else `max_results`; both must be covered.
+        result = self._run(["--max-results", "100"])
+        assert result.exit_code == 0
+        assert "Reached the cap of 100" in result.stderr
+
+    def test_an_uncapped_stream_says_nothing_about_a_cap(self):
+        result = self._run([])
+        assert result.exit_code == 0
+        assert "Reached the cap" not in result.stderr

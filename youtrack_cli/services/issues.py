@@ -130,9 +130,18 @@ class IssueService(BaseService):
                 params["fields"] = fields
             else:
                 params["fields"] = (
-                    "id,summary,description,state,priority,type,"
+                    # `idReadable` first, and for the same reason every profile carries it
+                    # (#780): it is the only stable public name for an issue, so a caller that
+                    # asked for one issue as data could not name what it read.
+                    "id,idReadable,summary,description,"
+                    # No `state`, `priority` or `type`: not top-level issue fields, so the API
+                    # drops them. Provable rather than assumed — every issue in a project carries
+                    # all three inside `customFields`. Their values are one expansion away.
                     "assignee(login,fullName),project(id,name),created,updated,"
-                    "tags(name),links(linkType,direction,issues(id,summary)),"
+                    # `linkType(name)`, not a bare `linkType`: asked for on its own the API
+                    # returns an object carrying only `$type`, so the name is absent and every
+                    # renderer downstream reads `linkType.get("name", "")` and gets nothing.
+                    "tags(name),links(linkType(name),direction,issues(id,summary)),"
                     "customFields(id,name,value(login,fullName,name))"
                 )
 
@@ -523,8 +532,13 @@ class IssueService(BaseService):
             if fields:
                 params["fields"] = fields
             else:
+                # `state`, `priority` and `type` are deliberately absent: they are not top-level
+                # issue fields, the API drops them, and every issue in a project carries all three
+                # inside `customFields` — so their absence here is the field not existing, not the
+                # value being empty. `linkType(name)` likewise: a bare `linkType` returns an object
+                # carrying only `$type`. See `KNOWN` notes in field_selection.py.
                 params["fields"] = (
-                    "id,idReadable,summary,description,state,priority,type,"
+                    "id,idReadable,summary,description,"
                     "assignee(login,fullName),project(id,name,shortName),"
                     "created,updated,tags(name),"
                     "customFields(id,name,value(login,fullName,name))"

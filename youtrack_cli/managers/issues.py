@@ -227,6 +227,8 @@ class IssueManager:
         overall_limit = top if top is not None else max_results
         per_page = page_size if page_size and page_size > 0 else 100
         collected: list[dict[str, Any]] = []
+        truncated = False
+        incomplete_reason: str | None = None
         offset = skip or 0
         while overall_limit is None or len(collected) < overall_limit:
             this_page = per_page if overall_limit is None else min(per_page, overall_limit - len(collected))
@@ -242,6 +244,10 @@ class IssueManager:
                 if not collected:
                     return page_result
                 logger.warning("Issue pagination stopped after a failed page at skip=%d", offset)
+                # A failed page is also an incomplete result, and `count` is a count of what
+                # survived rather than of what matched. Same class as a cap: report it, because
+                # `Total: N issues` after a partial fetch is a number that means something else.
+                incomplete_reason = f"the fetch failed part-way (page at skip={offset} did not return)"
                 break
             page_data = page_result.get("data") or []
             if not isinstance(page_data, list):
@@ -250,8 +256,24 @@ class IssueManager:
             offset += len(page_data)
             if len(page_data) < this_page:
                 break  # short page → no more results
+        else:
+            # The loop ended on the cap rather than on a short page, and the last page came back
+            # full — so at least one more match exists. The count below is a cap, not the size of
+            # the result set, and a caller reading it as a total is reading a number that means
+            # something else. Say so rather than letting it pass for an answer.
+            truncated = True
 
         result: dict[str, Any] = {"status": "success", "data": collected, "count": len(collected)}
+        if incomplete_reason:
+            result["incomplete"] = True
+            result["incomplete_reason"] = incomplete_reason
+        if truncated:
+            result["truncated"] = True
+            result["truncated_at"] = overall_limit
+        # What was actually requested, after a profile was expanded. The command verifies the
+        # response against this rather than against whatever the caller typed, so a profile that
+        # names a field the API drops is caught on exactly the same path as a user's typo.
+        result["requested_fields"] = fields
 
         # Add presentation logic for different output formats
         if format_output != "json":
