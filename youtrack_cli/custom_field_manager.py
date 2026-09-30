@@ -6,10 +6,45 @@ custom fields across the YouTrack CLI application, reducing code duplication and
 improving maintainability.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
-from .custom_field_types import CustomFieldValueTypes, IssueCustomFieldTypes, ProjectCustomFieldTypes, get_display_name
-from .exceptions import UnsupportedCustomFieldTypeError
+from .custom_field_types import CustomFieldValueTypes, IssueCustomFieldTypes, get_display_name
+from .exceptions import (
+    CustomFieldMultiplicityUnknownError,
+    CustomFieldUnresolvedReason,
+    CustomFieldValueCountError,
+    CustomFieldValueTypeError,
+    UnsupportedCustomFieldTypeError,
+)
+
+
+def _require_single_value(name: str, values: list[Any], issue_field_type: str | None) -> None:
+    """Refuse several values for a field that holds one.
+
+    Every value given is a statement about what the caller wants set, so dropping all but
+    the last would answer a question that was not asked -- and answer it with a success
+    message. A field that holds several is reached through the multi-value branch instead,
+    which is chosen by the field's own multiplicity rather than by the caller guessing it.
+    """
+    if len(values) > 1:
+        raise CustomFieldValueCountError(name, values, issue_field_type)
+
+
+def _require_writable_value(name: str, values: list[Any]) -> None:
+    """Refuse a value no builder can put on the wire.
+
+    `yt batch create --file items.json` forwards every non-null field of a JSON row
+    verbatim, so this receives whatever that file holds: a bool where a number was meant,
+    an object where a string was meant. Those are not values this CLI can state -- `True`
+    is an `int` to `isinstance`, so a numeric field would take it as 1, and an object
+    would be stringified -- and writing either would report success for something the
+    caller did not ask for. Naming the field is the whole point of refusing here.
+    """
+    unwritable = [value for value in values if not isinstance(value, str | int | float) or isinstance(value, bool)]
+    if unwritable:
+        given = ", ".join(f"{type(value).__name__}" for value in unwritable)
+        raise CustomFieldValueTypeError(name, given)
 
 
 class CustomFieldManager:
@@ -335,6 +370,13 @@ class CustomFieldManager:
         """
         Check if a field type is multi-value.
 
+        Only meaningful for the *issue*-side vocabulary, which is the one that spells
+        multiplicity into the type name. The project admin API names only the kind of
+        field and reports multiplicity separately, on the field's ``fieldType``
+        (``isMultiValue``, or the ``[*]`` suffix on ``fieldType.id``) -- so a
+        ``ProjectCustomFieldTypes`` value passed here is always answered False, and
+        asking the project side this way cannot work.
+
         Args:
             field_type: The field type string
 
@@ -347,14 +389,6 @@ class CustomFieldManager:
             IssueCustomFieldTypes.MULTI_VERSION,
             IssueCustomFieldTypes.MULTI_BUILD,
             IssueCustomFieldTypes.MULTI_OWNED,
-            ProjectCustomFieldTypes.MULTI_ENUM,
-            ProjectCustomFieldTypes.MULTI_USER,
-            # A version field is single-named on the project ("VersionProjectCustomField")
-            # but holds several values on the issue, so both spellings count as multi.
-            ProjectCustomFieldTypes.SINGLE_VERSION,
-            ProjectCustomFieldTypes.MULTI_VERSION,
-            ProjectCustomFieldTypes.MULTI_BUILD,
-            ProjectCustomFieldTypes.MULTI_OWNED,
         }
         return field_type in multi_value_types
 
@@ -447,46 +481,167 @@ class CustomFieldManager:
         }
 
     @staticmethod
-    def create_field_by_type(field_info: dict[str, Any], name: str, value: str) -> dict[str, Any]:
+    def create_multi_version_field(name: str, values: list[str]) -> dict[str, Any]:
+        """
+        Create a multi version custom field.
+
+        Args:
+            name: The field name
+            values: List of version names
+
+        Returns:
+            Dictionary representing the custom field
+        """
+        return {
+            "$type": IssueCustomFieldTypes.MULTI_VERSION,
+            "name": name,
+            "value": [{"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": value} for value in values],
+        }
+
+    @staticmethod
+    def create_multi_build_field(name: str, values: list[str]) -> dict[str, Any]:
+        """
+        Create a multi build custom field.
+
+        Args:
+            name: The field name
+            values: List of build names
+
+        Returns:
+            Dictionary representing the custom field
+        """
+        return {
+            "$type": IssueCustomFieldTypes.MULTI_BUILD,
+            "name": name,
+            "value": [{"$type": CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT, "name": value} for value in values],
+        }
+
+    @staticmethod
+    def create_multi_owned_field(name: str, values: list[str]) -> dict[str, Any]:
+        """
+        Create a multi owned custom field.
+
+        Args:
+            name: The field name
+            values: List of owned value names
+
+        Returns:
+            Dictionary representing the custom field
+        """
+        return {
+            "$type": IssueCustomFieldTypes.MULTI_OWNED,
+            "name": name,
+            "value": [{"$type": CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT, "name": value} for value in values],
+        }
+
+    @staticmethod
+    def create_field_by_type(
+        field_info: dict[str, Any], name: str, value: str | int | float | Sequence[Any]
+    ) -> dict[str, Any]:
         """
         Create a custom field using discovered type information.
 
         Args:
             field_info: Field information from discover_custom_field
             name: Field name
-            value: Field value (as string from CLI)
+            value: One value, or several for a field that holds several. A sequence is
+                read as the field's values and a non-sequence as one value of whatever
+                scalar type it has -- `yt batch` forwards every non-null field from a JSON
+                row verbatim, so a numeric custom field arrives as a number, not a string.
+                A value that is neither a string, a number, nor a sequence of them is
+                refused rather than coerced.
 
         Returns:
             Formatted custom field dictionary
 
         Raises:
-            UnsupportedCustomFieldTypeError: The field's type is not one this CLI
-                knows how to write. Raised rather than guessed: an unrecognised type
-                sent as an enum is rejected by the server as a confusing type
-                mismatch, and the wrong value shape is indistinguishable from a bad
-                value at the call site.
+            UnsupportedCustomFieldTypeError: The field's type is not one this CLI knows
+                how to write. Raised rather than guessed: an unrecognised type sent as an
+                enum is rejected by the server as a confusing type mismatch, and the wrong
+                value shape is indistinguishable from a bad value at the call site.
+            CustomFieldMultiplicityUnknownError: The field is bundle-backed and the server
+                did not report whether it holds one value or several, so the value shape
+                cannot be stated.
+            CustomFieldValueCountError: No value was given, or several were given for a
+                field that holds one. Refused rather than resolved by keeping the last,
+                which would report success for a request that did not say what it meant.
+            CustomFieldValueTypeError: A value is not a string, a number, or a sequence of
+                them, so no builder can state it.
         """
         issue_field_type = field_info.get("issue_field_type")
         project_field_type = field_info.get("project_field_type")
+        values = (
+            list(value)
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray | memoryview)
+            else [value]
+        )
 
-        # Map issue field types to creation methods
+        # A field whose *type* could not be resolved is settled first, then whether a value
+        # was supplied, then whether that value can be stated -- in the order each answer
+        # becomes reachable. The other order reports "no value was given" for a field this
+        # CLI cannot write anyway, pointing the reader at a value they never supplied while
+        # the real cause surfaces only on the next attempt.
+        if issue_field_type is None:
+            if field_info.get("unresolved_reason") == CustomFieldUnresolvedReason.MULTIPLICITY:
+                raise CustomFieldMultiplicityUnknownError(name, project_field_type)
+            raise UnsupportedCustomFieldTypeError(name, project_field_type, issue_field_type)
+
+        if not values:
+            # An empty list is not a value the caller can have meant: `-cf "Field="` is
+            # rejected at the CLI boundary, so one here came from a programmatic caller
+            # (`yt batch` forwards an empty JSON list verbatim). Writing it would clear a
+            # field on the strength of nothing.
+            raise CustomFieldValueCountError(name, values, issue_field_type)
+
+        _require_writable_value(name, values)
+
+        # Multi-valued fields take a list, and the value element carries the same bundle
+        # discriminator a single-valued one does -- so these are the same payloads with a
+        # list, not a different kind of write. The enum forms are dispatched separately
+        # because they are the only ones that need the discovered element type; the rest
+        # fix their own from the kind.
+        if issue_field_type == IssueCustomFieldTypes.MULTI_ENUM:
+            return CustomFieldManager._create_multi_bundle_backed_enum_field(name, values, field_info)
+
+        multi_value_builders = {
+            IssueCustomFieldTypes.MULTI_USER: CustomFieldManager.create_multi_user_field,
+            IssueCustomFieldTypes.MULTI_VERSION: CustomFieldManager.create_multi_version_field,
+            IssueCustomFieldTypes.MULTI_BUILD: CustomFieldManager.create_multi_build_field,
+            IssueCustomFieldTypes.MULTI_OWNED: CustomFieldManager.create_multi_owned_field,
+        }
+        if issue_field_type in multi_value_builders:
+            return multi_value_builders[issue_field_type](name, values)
+
+        # Map issue field types to creation methods. Every single-valued branch goes
+        # through the same count check: a branch that quietly took the first of several
+        # values would drop one without saying so, which is the behaviour this replaced.
         if issue_field_type == IssueCustomFieldTypes.TEXT:
-            return CustomFieldManager.create_text_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_text_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.INTEGER:
-            return CustomFieldManager.create_simple_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_simple_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_USER:
-            return CustomFieldManager.create_single_user_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_single_user_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_OWNED:
-            return CustomFieldManager.create_single_owned_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_single_owned_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_VERSION:
-            return CustomFieldManager.create_single_version_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_single_version_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_BUILD:
-            return CustomFieldManager.create_single_build_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_single_build_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_ENUM:
-            return CustomFieldManager._create_bundle_backed_enum_field(name, value, field_info)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager._create_bundle_backed_enum_field(name, values[0], field_info)
         elif issue_field_type == IssueCustomFieldTypes.STATE:
-            return CustomFieldManager.create_state_field(name, value)
+            _require_single_value(name, values, issue_field_type)
+            return CustomFieldManager.create_state_field(name, values[0])
         else:
+            # A type that resolved but has no branch here: a constant added to the issue
+            # vocabulary and mapped without a writer. Refused rather than defaulted.
             raise UnsupportedCustomFieldTypeError(name, project_field_type, issue_field_type)
 
     @staticmethod
@@ -506,4 +661,23 @@ class CustomFieldManager:
             "$type": IssueCustomFieldTypes.SINGLE_ENUM,
             "name": name,
             "value": {"$type": element_type, "name": value},
+        }
+
+    @staticmethod
+    def _create_multi_bundle_backed_enum_field(
+        name: str,
+        values: list[str],
+        field_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a multi enum-shaped field, taking the value discriminator from discovery.
+
+        The list form of `_create_bundle_backed_enum_field`, and for the same reason: a
+        bundle that reports its element type is authoritative, and a plain enum field
+        always reports EnumBundleElement.
+        """
+        element_type = field_info.get("bundle_element_type") or CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT
+        return {
+            "$type": IssueCustomFieldTypes.MULTI_ENUM,
+            "name": name,
+            "value": [{"$type": element_type, "name": value} for value in values],
         }

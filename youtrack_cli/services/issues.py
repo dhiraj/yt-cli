@@ -3,7 +3,7 @@
 from typing import Any
 
 from ..custom_field_manager import CustomFieldManager
-from ..exceptions import UnsupportedCustomFieldTypeError
+from ..exceptions import CustomFieldWriteRefusal
 from ..logging import get_logger
 from .base import BaseService
 
@@ -25,7 +25,7 @@ class IssueService(BaseService):
         issue_type: str | None = None,
         priority: str | None = None,
         assignee: str | None = None,
-        custom_fields: dict[str, str] | None = None,
+        custom_fields: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         """Create a new issue via API.
 
@@ -99,7 +99,7 @@ class IssueService(BaseService):
                         custom_fields_list.append(
                             CustomFieldManager.create_field_by_type(field_info_result["data"], field_name, field_value)
                         )
-                    except UnsupportedCustomFieldTypeError as e:
+                    except CustomFieldWriteRefusal as e:
                         return self._create_error_response(f"{e.message}. {e.suggestion or ''}".strip())
 
             # Add custom fields if any were specified
@@ -162,7 +162,7 @@ class IssueService(BaseService):
         priority: str | None = None,
         assignee: str | None = None,
         issue_type: str | None = None,
-        custom_fields: dict[str, str] | None = None,
+        custom_fields: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         """Update an existing issue via API.
 
@@ -310,7 +310,7 @@ class IssueService(BaseService):
                         custom_fields_list.append(
                             CustomFieldManager.create_field_by_type(field_info_result["data"], field_name, field_value)
                         )
-                    except UnsupportedCustomFieldTypeError as e:
+                    except CustomFieldWriteRefusal as e:
                         return self._create_error_response(f"{e.message}. {e.suggestion or ''}".strip())
 
             # Add custom fields if any

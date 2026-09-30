@@ -11,6 +11,7 @@ from youtrack_cli.custom_field_types import (
     IssueCustomFieldTypes,
     ProjectCustomFieldTypes,
 )
+from youtrack_cli.exceptions import CustomFieldUnresolvedReason
 from youtrack_cli.services.issues import IssueService
 from youtrack_cli.services.projects import ProjectService
 
@@ -59,6 +60,98 @@ class TestIssueServiceCreation:
             )
             mock_handle.assert_called_once_with(mock_response, success_codes=[200, 201])
             assert result["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_create_issue_writes_several_values_for_a_multi_valued_field(self, issue_service, mock_response):
+        """The create path carries the same value list the update path does.
+
+        Worth pinning separately because the two paths resolve fields independently: a
+        create that dropped all but the last value would leave the issue created with
+        one of the two versions asked for.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.ENUM,
+                    "issue_field_type": IssueCustomFieldTypes.MULTI_ENUM,
+                    "is_multi_value": True,
+                    "bundle_element_type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT,
+                },
+            }
+
+            result = await issue_service.create_issue(
+                "project-1", "Test Summary", custom_fields={"Sprint": ["S1", "S2"]}
+            )
+
+            assert result["status"] == "success"
+            sent = mock_request.call_args.kwargs["json_data"]["customFields"][0]
+            assert sent["$type"] == IssueCustomFieldTypes.MULTI_ENUM
+            assert [element["name"] for element in sent["value"]] == ["S1", "S2"]
+
+    @pytest.mark.asyncio
+    async def test_several_values_for_a_single_valued_field_create_no_issue(self, issue_service, mock_response):
+        """A refused field must stop the create, not produce an issue missing a value.
+
+        Half a create is worse than none: the issue exists, and the value the caller
+        asked for does not, with nothing in the output to say so.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.ENUM,
+                    "issue_field_type": IssueCustomFieldTypes.SINGLE_ENUM,
+                },
+            }
+
+            result = await issue_service.create_issue(
+                "project-1", "Test Summary", custom_fields={"Repo": ["ios", "android"]}
+            )
+
+            assert result["status"] == "error"
+            assert "2 were given" in result["message"]
+            mock_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unwritable_value_creates_no_issue(self, issue_service, mock_response):
+        """A value the CLI cannot state must not leave a half-built issue behind.
+
+        Half a create is worse than none: the issue exists, and the value the caller asked
+        for does not, with nothing in the output to say so.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.INTEGER,
+                    "issue_field_type": IssueCustomFieldTypes.INTEGER,
+                },
+            }
+
+            result = await issue_service.create_issue("project-1", "Test Summary", custom_fields={"Story Points": True})
+
+            assert result["status"] == "error"
+            assert "not a field value" in result["message"]
+            mock_request.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_issue_with_all_fields(self, issue_service, mock_response):
@@ -391,12 +484,12 @@ class TestIssueServiceUpdate:
             mock_discover.return_value = {
                 "status": "success",
                 "data": {
-                    "project_field_type": ProjectCustomFieldTypes.SINGLE_USER,
+                    "project_field_type": ProjectCustomFieldTypes.USER,
                     "issue_field_type": IssueCustomFieldTypes.SINGLE_USER,
                 },
             }
 
-            await issue_service.update_issue("TEST-1", custom_fields={"Assigned": "someone"})
+            await issue_service.update_issue("TEST-1", custom_fields={"Assigned": ["someone"]})
 
             mock_request.assert_called_once_with(
                 "POST",
@@ -463,7 +556,7 @@ class TestIssueServiceUpdate:
                 },
             }
 
-            await issue_service.update_issue("TEST-1", custom_fields={"Repo": "root"})
+            await issue_service.update_issue("TEST-1", custom_fields={"Repo": ["root"]})
 
             sent = mock_request.call_args.kwargs["json_data"]["customFields"][0]
             assert sent["value"] == {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "root"}
@@ -498,13 +591,191 @@ class TestIssueServiceUpdate:
             mock_discover.side_effect = discover
 
             result = await issue_service.update_issue(
-                "TEST-1", summary="Renamed", custom_fields={"Repo": "root", "Mystery": "x"}
+                "TEST-1", summary="Renamed", custom_fields={"Repo": ["root"], "Mystery": ["x"]}
             )
 
             assert result["status"] == "error"
             assert "Mystery" in result["message"]
             assert "SomethingNewProjectCustomField" in result["message"]
             # The summary change must not land either: the update is all-or-nothing.
+            mock_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_issue_writes_several_values_for_a_multi_valued_field(self, issue_service, mock_response):
+        """A field that holds several is written as a list, in the order given.
+
+        The end-to-end shape of the feature: the CLI's repeated `-cf` reaches the wire
+        as one field with several values, not as two fields fighting over one name.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.VERSION,
+                    "issue_field_type": IssueCustomFieldTypes.MULTI_VERSION,
+                    "is_multi_value": True,
+                },
+            }
+
+            await issue_service.update_issue("TEST-1", custom_fields={"Fix versions": ["1.0", "1.1"]})
+
+            mock_request.assert_called_once_with(
+                "POST",
+                "issues/TEST-1",
+                json_data={
+                    "$type": "Issue",
+                    "customFields": [
+                        {
+                            "$type": IssueCustomFieldTypes.MULTI_VERSION,
+                            "name": "Fix versions",
+                            "value": [
+                                {"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": "1.0"},
+                                {"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": "1.1"},
+                            ],
+                        }
+                    ],
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_several_values_for_a_single_valued_field_block_the_whole_update(self, issue_service, mock_response):
+        """Two values for a one-value field is refused, and nothing is sent.
+
+        Keeping the last would report success for a request that did not say what it
+        meant, and the other value would vanish with no trace. The refusal also has to
+        hold the all-or-nothing property the other refusals have: a summary change given
+        in the same command must not land on its own.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.ENUM,
+                    "issue_field_type": IssueCustomFieldTypes.SINGLE_ENUM,
+                },
+            }
+
+            result = await issue_service.update_issue(
+                "TEST-1", summary="Renamed", custom_fields={"Repo": ["ios", "android"]}
+            )
+
+            assert result["status"] == "error"
+            assert "2 were given" in result["message"]
+            assert "Repo" in result["message"]
+            mock_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unwritable_value_blocks_the_whole_update(self, issue_service, mock_response):
+        """A JSON object or boolean where a value belongs is refused, and nothing is sent.
+
+        `yt batch create --file items.json` forwards every non-null field of a row
+        verbatim, so this reaches the writer -- and a boolean is an `int` to `isinstance`,
+        so a numeric field would otherwise take `true` as 1 and report success.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.INTEGER,
+                    "issue_field_type": IssueCustomFieldTypes.INTEGER,
+                },
+            }
+
+            result = await issue_service.update_issue(
+                "TEST-1", summary="Renamed", custom_fields={"Story Points": {"value": 8}}
+            )
+
+            assert result["status"] == "error"
+            assert "not a field value" in result["message"]
+            assert "Story Points" in result["message"]
+            mock_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_issue_writes_a_multi_valued_field_from_one_value(self, issue_service, mock_response):
+        """One value for a field that holds several is a one-element list, not a refusal.
+
+        The field can hold many; asking for one of them is an ordinary request, and
+        refusing it sent users to the web UI for something the API answers exactly.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.VERSION,
+                    "issue_field_type": IssueCustomFieldTypes.MULTI_VERSION,
+                    "is_multi_value": True,
+                },
+            }
+
+            result = await issue_service.update_issue("TEST-1", custom_fields={"Fix versions": ["1.0"]})
+
+            assert result["status"] == "success"
+            sent = mock_request.call_args.kwargs["json_data"]["customFields"][0]
+            assert sent["value"] == [{"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": "1.0"}]
+
+    @pytest.mark.asyncio
+    async def test_unreported_multiplicity_blocks_the_whole_update(self, issue_service, mock_response):
+        """A field whose shape the server did not report is refused, not guessed.
+
+        Reporting it as an unknown *type* would send the reader looking at the wrong
+        vocabulary; the cause is a missing field in the response for a kind this CLI
+        handles, and the message says so.
+        """
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.ENUM,
+                    "issue_field_type": None,
+                    "is_multi_value": None,
+                    "unresolved_reason": CustomFieldUnresolvedReason.MULTIPLICITY,
+                },
+            }
+
+            result = await issue_service.update_issue("TEST-1", custom_fields={"Sprint": ["S1"]})
+
+            assert result["status"] == "error"
+            assert "one value or several" in result["message"]
             mock_request.assert_not_called()
 
     @pytest.mark.asyncio

@@ -31,24 +31,28 @@ class IssueCustomFieldTypes:
 class ProjectCustomFieldTypes:
     """Custom field types for projects.
 
-    These are the ``$type`` discriminators the *project* admin API returns, which name
-    the kind of field (``UserProjectCustomField``) and not the issue-side spelling
-    (``SingleUserIssueCustomField``). Keeping the two vocabularies apart matters: a
-    project type that is spelled like its issue counterpart never matches a real
-    response, and the lookup that consumes these then falls through to a default.
+    These are the ``$type`` discriminators the *project* admin API returns. Two
+    properties of that vocabulary are what the lookup built on it has to get right,
+    and both were verified against a live instance rather than inferred:
+
+    1. It names the **kind** of field (``UserProjectCustomField``), never the
+       issue-side spelling (``SingleUserIssueCustomField``). A project type spelled
+       like its issue counterpart matches no real response, and the lookup that
+       consumes it then falls through.
+    2. It carries **no multiplicity**. There is no ``MultiEnumProjectCustomField``:
+       whether a field holds one value or several is a property of the attached
+       field type, reported as ``field.fieldType.isMultiValue`` (alongside
+       ``fieldType.id``, e.g. ``enum[1]`` or ``version[*]``). So the single/multi
+       decision cannot be read off these strings — it has to be asked for, and
+       naming a ``Multi…`` constant here describes a response that never occurs.
     """
 
     ENUM = "EnumProjectCustomField"
-    MULTI_ENUM = "MultiEnumProjectCustomField"
     STATE = "StateProjectCustomField"
     OWNED = "OwnedProjectCustomField"
-    MULTI_OWNED = "MultiOwnedProjectCustomField"
-    SINGLE_USER = "UserProjectCustomField"
-    MULTI_USER = "MultiUserProjectCustomField"
-    SINGLE_VERSION = "VersionProjectCustomField"
-    MULTI_VERSION = "MultiVersionProjectCustomField"
-    SINGLE_BUILD = "BuildProjectCustomField"
-    MULTI_BUILD = "MultiBuildProjectCustomField"
+    USER = "UserProjectCustomField"
+    VERSION = "VersionProjectCustomField"
+    BUILD = "BuildProjectCustomField"
     TEXT = "TextProjectCustomField"
     PERIOD = "PeriodProjectCustomField"
     DATE = "DateProjectCustomField"
@@ -102,16 +106,11 @@ FIELD_TYPE_DISPLAY_MAP = {
     IssueCustomFieldTypes.FLOAT: "Float",
     # Project field types
     ProjectCustomFieldTypes.ENUM: "Enum",
-    ProjectCustomFieldTypes.MULTI_ENUM: "Multi Enum",
     ProjectCustomFieldTypes.STATE: "State",
     ProjectCustomFieldTypes.OWNED: "Owned",
-    ProjectCustomFieldTypes.MULTI_OWNED: "Multi Owned",
-    ProjectCustomFieldTypes.SINGLE_USER: "Single User",
-    ProjectCustomFieldTypes.MULTI_USER: "Multi User",
-    ProjectCustomFieldTypes.SINGLE_VERSION: "Single Version",
-    ProjectCustomFieldTypes.MULTI_VERSION: "Multi Version",
-    ProjectCustomFieldTypes.SINGLE_BUILD: "Single Build",
-    ProjectCustomFieldTypes.MULTI_BUILD: "Multi Build",
+    ProjectCustomFieldTypes.USER: "User",
+    ProjectCustomFieldTypes.VERSION: "Version",
+    ProjectCustomFieldTypes.BUILD: "Build",
     ProjectCustomFieldTypes.TEXT: "Text",
     ProjectCustomFieldTypes.PERIOD: "Period",
     ProjectCustomFieldTypes.DATE: "Date",

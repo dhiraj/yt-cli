@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ✨ `yt issues create --custom-field` and `yt issues update --custom-field` can now set a
+  field that holds several values. Repeat a field name to give it several
+  (`-cf "Fix versions=1.0" -cf "Fix versions=1.1"`); on an update those values replace the
+  field's current ones, and a single value is a one-element list on such a field. Enum,
+  user, owned, version and build fields are supported, single- or multi-valued (#782).
+  Previously every multi-valued field was refused, which sent users to the web UI for a
+  field the API answers exactly, and a repeated field name silently kept only the last
+  value.
+
 ### Fixed
 - 🐛 `yt issues update --custom-field` and `yt issues create --custom-field` now
   write each field with the type that field actually reports, so user, owned,
@@ -15,8 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `project_id` when `--state` was not also passed, and the project-side type
   vocabulary used issue-side spellings, so those lookups matched nothing. A
   field the CLI cannot type is now refused by name before any value is sent
-  rather than a guessed value being written, and a multi-valued field such as
-  *Fix versions* is refused for the same reason (#778)
+  rather than a guessed value being written (#778)
+- 🐛 Whether a field holds one value or several is now read from the field
+  instead of inferred from its kind. The project API names the kind of a field
+  and reports multiplicity on the field's own type, so there is no
+  `MultiEnumProjectCustomField` to key on and the previous mapping both missed
+  those kinds and hardcoded which of them were multi-valued: a multi-valued
+  user field was written as `SingleUserIssueCustomField`, and a single-valued
+  version field as `MultiVersionIssueCustomField`. A bundle-backed field whose
+  multiplicity the server does not report is now refused by name rather than
+  guessed, and a field given several values that holds one is refused instead
+  of quietly keeping the last (#778, #782)
 
 ## [0.25.1] - 2026-08-04
 

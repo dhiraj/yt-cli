@@ -48,7 +48,8 @@ Create new issues in YouTrack projects.
   * ``-t, --type TEXT`` - Issue type (e.g., Bug, Feature, Task)
   * ``-p, --priority TEXT`` - Issue priority (e.g., Critical, High, Medium, Low)
   * ``-a, --assignee TEXT`` - Username of the assignee
-  * ``-cf, --custom-field TEXT`` - Custom field in format "FieldName=value" (repeatable)
+  * ``-cf, --custom-field TEXT`` - Custom field in format "FieldName=value". Repeat a field name to set
+    several values, on a field that holds several
   * ``--tag TEXT`` - Tag name to apply (repeatable). The tag must already exist.
 
 **Tags**
@@ -64,18 +65,31 @@ not exist is refused **by name** rather than skipped — create it first with ``
 
 **Custom Fields**
 
-The ``--custom-field`` option supports all YouTrack custom field types:
+The ``--custom-field`` option supports these YouTrack custom field types:
 
-* **Enum fields**: Single and multi-value enum fields (e.g., Priority, Status)
+* **Enum fields**: Single and multi-value enum fields (e.g., Priority, Status, Sprint)
 * **Text fields**: Free-form text fields
 * **Simple fields**: Integer and float numeric fields
 * **User fields**: Single and multi-user fields (use login names)
-* **Version fields**: Version bundle fields
-* **Build fields**: Build bundle fields
-* **Date/DateTime fields**: Date and date-time fields (use Unix timestamps in milliseconds)
-* **Period fields**: Time period fields
+* **Version fields**: Version bundle fields, single- or multi-valued
+* **Build fields**: Build bundle fields, single- or multi-valued
+* **Owned fields**: Owned bundle fields, single- or multi-valued
 
-The CLI automatically detects the field type from the project configuration. If type discovery fails, it falls back to enum type as a safe default.
+Not supported: date, date-time and period fields.
+
+The CLI detects the field's type from the project configuration, and whether the field holds
+one value or several from the field itself. Repeat a field name to set several values, on a
+field that holds several. On ``update`` those values replace the field's current ones; on
+``create`` the field starts empty, so there is nothing to replace.
+
+.. code-block:: bash
+
+   yt issues update PROJ-1 -cf "Fix versions=1.0" -cf "Fix versions=1.1"
+
+If the field cannot be written exactly -- an unrecognised kind, several values for a field
+that holds one, or a response that does not say whether the field is single- or multi-valued
+-- the command refuses by name and sends nothing, rather than guessing a payload the server
+would reject.
 
 **Examples:**
 
@@ -185,12 +199,13 @@ Update existing issues with new field values.
   * ``-p, --priority TEXT`` - New issue priority
   * ``-a, --assignee TEXT`` - New assignee username
   * ``-t, --type TEXT`` - New issue type
-  * ``-cf, --custom-field TEXT`` - Custom field in format "FieldName=value" (repeatable)
+  * ``-cf, --custom-field TEXT`` - Custom field in format "FieldName=value". Repeat a field name to set
+    several values on a field that holds several; the values replace the field's current ones
   * ``--show-details`` - Show current issue details instead of updating
 
 **Custom Fields**
 
-The ``--custom-field`` option is repeatable and supports all YouTrack custom field types, consistent with the create command. See the Create Issues section for field type details.
+The ``--custom-field`` option is repeatable, consistent with the create command, and behaves the same way: repeating a field name sets several values on a field that holds several, and a field that cannot be written exactly is refused by name with nothing sent. See the Create Issues section for field type details.
 
 **Examples:**
 
@@ -201,6 +216,9 @@ The ``--custom-field`` option is repeatable and supports all YouTrack custom fie
 
    # Update with custom fields
    yt issues update PROJ-123 -cf "Team=Frontend" -cf "StoryPoints=8"
+
+   # Set several values on a field that holds several (they replace its current values)
+   yt issues update PROJ-123 -cf "Fix versions=1.0" -cf "Fix versions=1.1"
 
    # View current issue details
    yt issues update PROJ-123 --show-details

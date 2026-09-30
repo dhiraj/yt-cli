@@ -1,5 +1,7 @@
 """Custom exceptions and error handling for YouTrack CLI."""
 
+from typing import Any
+
 __all__ = [
     "YouTrackError",
     "AuthenticationError",
@@ -15,7 +17,12 @@ __all__ = [
     "UsageError",
     "TokenRefreshError",
     "TokenExpiredError",
+    "CustomFieldWriteRefusal",
+    "CustomFieldUnresolvedReason",
     "UnsupportedCustomFieldTypeError",
+    "CustomFieldValueCountError",
+    "CustomFieldValueTypeError",
+    "CustomFieldMultiplicityUnknownError",
 ]
 
 
@@ -200,8 +207,39 @@ class TokenExpiredError(AuthenticationError):
         self.suggestion = "Run 'yt auth refresh' to renew your token or 'yt auth login' to re-authenticate"
 
 
-class UnsupportedCustomFieldTypeError(YouTrackError):
-    """A custom field's type cannot be determined well enough to write it.
+class CustomFieldWriteRefusal(YouTrackError):
+    """Base for the refusals that leave a custom field unwritten rather than guessed.
+
+    A custom field has to be written with an exact type and an exact value shape, and
+    both are learned from the server: the field's ``$type`` names the kind, and
+    ``fieldType.isMultiValue`` says whether it holds one value or several. When either
+    cannot be established, the alternatives are a guess — and a wrong guess is rejected
+    by the server as a type mismatch, which reads like a server or data problem rather
+    than a CLI limitation, or (worse) is accepted and quietly means something other than
+    what was asked for. Every subclass here answers one question — why was nothing sent
+    for this field? — so the create and update paths report refusals by name and leave
+    the issue untouched.
+    """
+
+
+class CustomFieldUnresolvedReason:
+    """Why a discovered field could not be turned into a writable payload.
+
+    The two causes are not the same problem and must not be reported as one: an
+    unrecognised kind is a limitation of this CLI, whereas an unreported multiplicity is
+    a gap in one server response for a kind this CLI handles perfectly well. Naming the
+    wrong one sends the reader looking in the wrong place -- at a vocabulary, or at a
+    field that is not the problem at all.
+
+    Discovery sets one of these; the writer turns it into the matching refusal.
+    """
+
+    TYPE = "type"
+    MULTIPLICITY = "multiplicity"
+
+
+class UnsupportedCustomFieldTypeError(CustomFieldWriteRefusal):
+    """A custom field's type is not one this CLI knows how to write.
 
     Raised instead of substituting a default field type. A field sent with the wrong
     type discriminator is rejected by the server as a type mismatch, which reads like
@@ -214,23 +252,96 @@ class UnsupportedCustomFieldTypeError(YouTrackError):
         self.project_field_type = project_field_type
         self.issue_field_type = issue_field_type
 
-        if issue_field_type and issue_field_type.startswith("Multi"):
-            message = (
-                f"Cannot set field '{field_name}': it holds several values "
-                f"('{issue_field_type}') and --custom-field sets a single value"
-            )
+        described = project_field_type or issue_field_type or "an unknown type"
+        message = f"Cannot set field '{field_name}': this CLI does not know how to write a field of type '{described}'"
+        suggestion = (
+            "No value was sent, so the issue is unchanged. Set the field through the YouTrack UI, "
+            "or use a dedicated option such as --assignee where one exists"
+        )
+
+        super().__init__(message, suggestion)
+
+
+class CustomFieldValueCountError(CustomFieldWriteRefusal):
+    """The number of values given cannot be written to this field.
+
+    Two cases, worded apart because asserting something untrue is worse than saying less.
+    No value at all says nothing about what the field holds -- the same call is wrong for a
+    single-valued and a multi-valued field, for different reasons -- so it does not claim
+    to. Several values for a field that holds one does name the cause, because that is
+    exactly what is wrong.
+    """
+
+    def __init__(self, field_name: str, values: list[Any], issue_field_type: str | None = None):
+        self.field_name = field_name
+        self.values = list(values)
+        self.issue_field_type = issue_field_type
+
+        if not self.values:
+            message = f"Cannot set field '{field_name}': no value was given"
             suggestion = (
-                "No value was sent, so the issue is unchanged. Set this field through the "
-                "YouTrack UI, or use a dedicated option where one exists"
+                "No value was sent, so the issue is unchanged. Give the field a value; "
+                '`-cf "Field="` is refused at the command line for the same reason'
             )
         else:
-            described = project_field_type or issue_field_type or "an unknown type"
+            given = ", ".join(repr(value) for value in self.values)
             message = (
-                f"Cannot set field '{field_name}': this CLI does not know how to write a field of type '{described}'"
+                f"Cannot set field '{field_name}': it holds a single value but {len(self.values)} were given ({given})"
             )
             suggestion = (
-                "No value was sent, so the issue is unchanged. Set the field through the YouTrack UI, "
-                "or use a dedicated option such as --assignee where one exists"
+                "No value was sent, so the issue is unchanged. Pass one value for this field. Repeating a "
+                "field name sets several values, and is only meaningful for a field that holds several"
             )
+
+        super().__init__(message, suggestion)
+
+
+class CustomFieldValueTypeError(CustomFieldWriteRefusal):
+    """A value's type is not one this CLI can put on the wire for a field.
+
+    Distinct from a wrong *value*, which the server rejects in its own words: this is a
+    value the CLI cannot state at all. `yt batch` forwards every non-null field of a JSON
+    row verbatim, so a bool where a number was meant, or an object where a string was
+    meant, arrives here rather than being caught earlier -- and a bool is an `int` to
+    `isinstance`, so a numeric field would silently take `true` as 1.
+    """
+
+    def __init__(self, field_name: str, given_types: str):
+        self.field_name = field_name
+        self.given_types = given_types
+
+        message = f"Cannot set field '{field_name}': a value of type {given_types} is not a field value"
+        suggestion = (
+            "No value was sent, so the issue is unchanged. A field value is a string, a number, or a list of "
+            "them. This usually means a value in a `yt batch` input file is a JSON object or a boolean"
+        )
+
+        super().__init__(message, suggestion)
+
+
+class CustomFieldMultiplicityUnknownError(CustomFieldWriteRefusal):
+    """The server did not report whether a field holds one value or several.
+
+    The value shape follows from multiplicity: a single-valued field takes one element
+    and a multi-valued one takes a list, so an unreported multiplicity means an
+    unstatable payload. It is reported as its own refusal rather than folded into the
+    "unknown type" one, which would name a type this CLI does in fact handle.
+    """
+
+    def __init__(self, field_name: str, project_field_type: str | None = None):
+        self.field_name = field_name
+        self.project_field_type = project_field_type
+
+        # The type is stated up front rather than appended: appended, it reads as though
+        # "of type X" qualified "several values", which is not what it says.
+        described = f" (type '{project_field_type}')" if project_field_type else ""
+        message = (
+            f"Cannot set field '{field_name}'{described}: the server did not report whether it holds "
+            "one value or several"
+        )
+        suggestion = (
+            "No value was sent, so the issue is unchanged. This is a gap in the server's response rather "
+            "than in the field — set it through the YouTrack UI, and please report it"
+        )
 
         super().__init__(message, suggestion)

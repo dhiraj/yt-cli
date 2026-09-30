@@ -1,9 +1,87 @@
 """Project service for YouTrack API operations."""
 
+import re
 from typing import Any
 
+from ..custom_field_types import IssueCustomFieldTypes, ProjectCustomFieldTypes
+from ..exceptions import CustomFieldUnresolvedReason
 from .base import BaseService
 from .field_cache import get_field_cache
+
+# The arity a field type id ends in: `enum[1]` and `user[1]` hold one value, `version[*]`
+# holds several. It is the same fact as `fieldType.isMultiValue`, spelled in the id, and it
+# answers in both directions -- so a response that carries the id without the boolean is
+# still a complete answer about the value's shape.
+_FIELD_TYPE_ARITY_SUFFIX = re.compile(r"\[(\*|\d+)\]$")
+
+
+def _split_selector_arguments(arguments: str) -> list[str]:
+    """Split a selector's argument list on the commas that are not inside parentheses.
+
+    Parentheses are the only nesting this needs to understand: YouTrack's ``fields``
+    syntax nests projections that way (``field(fieldType(id,name),name)``) and has no
+    bracketed form, so treating ``[`` as nesting too would be a rule about a syntax that
+    does not exist -- and one no selector here could exercise.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in arguments:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return [part.strip() for part in parts]
+
+
+def _selector_names_a_field(selector: str) -> bool:
+    """Whether a ``fields=`` selector already asks for a field's own name.
+
+    Only a *top-level* ``name`` argument of a ``field(...)`` clause counts. A ``name``
+    nested inside that clause belongs to something else -- ``field(fieldType(id,name))``
+    asks for the field *type's* name, not the field's -- and reading it as satisfied
+    suppresses the ``field(name)`` that the display path then needs, which renders every
+    name as ``N/A``. A substring test cannot tell the two apart, because
+    ``field(fieldType(name),name)`` contains ``name`` at both depths.
+    """
+    index = 0
+    while (open_paren := selector.find("field(", index)) != -1:
+        cursor = open_paren + len("field(")
+        depth = 1
+        while cursor < len(selector) and depth:
+            if selector[cursor] == "(":
+                depth += 1
+            elif selector[cursor] == ")":
+                depth -= 1
+            cursor += 1
+        if "name" in _split_selector_arguments(selector[open_paren + len("field(") : cursor - 1]):
+            return True
+        # Resume *inside* this clause rather than past it, so a `field(name)` nested in it
+        # is examined on the next pass. `index` still advances by at least the width of the
+        # token it just consumed, so this terminates.
+        index = open_paren + len("field(")
+    return False
+
+
+# Bundle-backed project kinds mapped to (single-valued, multi-valued) issue types. A kind
+# whose values live in a bundle -- enum, owned, user, version, build -- can hold one value
+# or several, and the project `$type` says only which kind it is. The multiplicity belongs
+# to the attached field type (`fieldType.isMultiValue`), so the pair is resolved against
+# that rather than against the kind. Built once: the constants are import-time, and a
+# function here would rebuild the same dict for every field discovered.
+_BUNDLE_ISSUE_FIELD_TYPES = {
+    ProjectCustomFieldTypes.ENUM: (IssueCustomFieldTypes.SINGLE_ENUM, IssueCustomFieldTypes.MULTI_ENUM),
+    ProjectCustomFieldTypes.OWNED: (IssueCustomFieldTypes.SINGLE_OWNED, IssueCustomFieldTypes.MULTI_OWNED),
+    ProjectCustomFieldTypes.USER: (IssueCustomFieldTypes.SINGLE_USER, IssueCustomFieldTypes.MULTI_USER),
+    ProjectCustomFieldTypes.VERSION: (IssueCustomFieldTypes.SINGLE_VERSION, IssueCustomFieldTypes.MULTI_VERSION),
+    ProjectCustomFieldTypes.BUILD: (IssueCustomFieldTypes.SINGLE_BUILD, IssueCustomFieldTypes.MULTI_BUILD),
+}
 
 
 class ProjectService(BaseService):
@@ -308,8 +386,14 @@ class ProjectService(BaseService):
                 # This ensures the name is available even when users specify their own fields
                 fields_list = [f.strip() for f in fields.split(",")]
 
-                # Check if field(name) is already included in some form
-                has_field_name = any("field(" in f and "name" in f for f in fields_list)
+                # Check if field(name) is already included in some form. Asked of the whole
+                # selector and answered by `_selector_names_a_field`, which reads each
+                # `field(...)` clause's own top-level arguments and looks inside a clause
+                # for a nested `field(name)`. Not per comma-separated fragment: a
+                # `field(...)` clause routinely contains commas of its own, so
+                # `field(fieldType(id,name,isMultiValue),name)` is one fragment that names a
+                # field, and a fragment test reads it as "no field(name) here".
+                has_field_name = _selector_names_a_field(fields)
 
                 if not has_field_name:
                     # Add field(name) to ensure name is always available for display
@@ -452,11 +536,19 @@ class ProjectService(BaseService):
             API response with detailed field information
         """
         try:
-            # First get the field details
+            # First get the field details. `isMultiValue` and the field type's `id` are
+            # both asked for, on this read and on the list read: the attached field type
+            # is where multiplicity lives, `id` spells it as an arity suffix, and neither
+            # is returned unless the selector names it. A payload's value shape cannot
+            # be built without them, and a selector that omits one is a silent refusal.
             field_response = await self._make_request(
                 "GET",
                 f"admin/projects/{project_id}/customFields/{field_id}",
-                params={"fields": "id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType,name)"},
+                params={
+                    "fields": (
+                        "id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType(id,name,isMultiValue),name)"
+                    )
+                },
             )
             field_result = await self._handle_response(field_response)
 
@@ -502,7 +594,8 @@ class ProjectService(BaseService):
                 return {"status": "success", "data": cached_result}
             # Get all custom fields for the project
             fields_response = await self.get_project_custom_fields(
-                project_id, fields="id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType,name)"
+                project_id,
+                fields="id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType(id,name,isMultiValue),name)",
             )
 
             if fields_response["status"] != "success":
@@ -615,7 +708,14 @@ class ProjectService(BaseService):
             # Get all custom fields for the project
             fields_response = await self.get_project_custom_fields(
                 project_id,
-                fields="id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType,name,$type)",
+                fields=(
+                    "id,name,fieldType,localizedName,isPublic,ordinal,"
+                    # `isMultiValue` is requested here as well as on the detail read: the
+                    # single/multi decision is the whole point of the mapping, and a field
+                    # whose list entry omits it is indistinguishable from a single-valued
+                    # one if the mapping ever has to fall back to the list.
+                    "field(fieldType(id,name,$type,isMultiValue),name,$type)"
+                ),
             )
 
             if fields_response["status"] != "success":
@@ -650,9 +750,26 @@ class ProjectService(BaseService):
 
             field_data = field_details["data"]
 
-            # Determine the issue field type from project field type
+            # The project API names the kind of field and reports multiplicity separately, on
+            # the attached field type. Both are needed, and neither can be inferred from the
+            # other: `VersionProjectCustomField` backs a single-valued version field in one
+            # project and a multi-valued one in another.
             project_field_type = field_data.get("$type", "")
-            issue_field_type = self._project_to_issue_field_type(project_field_type)
+            is_multi_value = self._is_multi_value(field_data, discovered_field)
+            issue_field_type = self._project_to_issue_field_type(project_field_type, is_multi_value)
+
+            # Why the issue type could not be resolved, when it could not be. The two causes
+            # are reported apart because they are not the same problem: an unrecognised kind
+            # is a CLI limitation, whereas an unreported multiplicity is a gap in the server's
+            # response for a kind this CLI handles. Naming the wrong one sends the reader
+            # looking in the wrong place.
+            unresolved_reason = None
+            if issue_field_type is None:
+                unresolved_reason = (
+                    CustomFieldUnresolvedReason.MULTIPLICITY
+                    if is_multi_value is None and project_field_type in _BUNDLE_ISSUE_FIELD_TYPES
+                    else CustomFieldUnresolvedReason.TYPE
+                )
 
             # Determine bundle element type if applicable
             bundle_element_type = None
@@ -667,7 +784,8 @@ class ProjectService(BaseService):
                 "project_field_type": project_field_type,
                 "issue_field_type": issue_field_type,
                 "bundle_element_type": bundle_element_type,
-                "is_multi_value": "Multi" in project_field_type,
+                "is_multi_value": is_multi_value,
+                "unresolved_reason": unresolved_reason,
                 "field_details": field_data,
             }
 
@@ -681,11 +799,46 @@ class ProjectService(BaseService):
         except Exception as e:
             return self._create_error_response(f"Error discovering custom field '{field_name}': {str(e)}")
 
-    def _project_to_issue_field_type(self, project_field_type: str) -> str | None:
+    def _is_multi_value(self, field_data: dict[str, Any], listed_field: dict[str, Any]) -> bool | None:
+        """Whether a field holds one value or several, as the server reports it.
+
+        Returns None when the server does not say, which is not the same as False: the
+        value shape follows from this answer, so "unknown" has to stay distinguishable
+        from "one value" or it becomes a guess (see ``CustomFieldMultiplicityUnknownError``).
+
+        Two independent signals are consulted, and the boolean is preferred over the arity
+        because it is the direct one: ``isMultiValue`` *is* the field's multiplicity,
+        while ``id`` merely spells it. Within a signal the detail read is preferred over the
+        list read, because it is the field being written. ``fieldType.id`` spells the same
+        fact as its arity suffix -- ``enum[1]`` and ``user[1]`` hold one value,
+        ``version[*]`` holds several -- and it answers in *both* directions, so a response
+        carrying the id but not the boolean is still answerable rather than refusable. Both
+        live on the attached field type (``field.fieldType``) and both are named in the
+        selectors this module sends; neither is returned otherwise. None means neither was
+        present.
+        """
+        for source in (field_data, listed_field):
+            reported = (source.get("field") or {}).get("fieldType") or {}
+            if reported.get("isMultiValue") is not None:
+                return bool(reported["isMultiValue"])
+        for source in (field_data, listed_field):
+            field_type_id = ((source.get("field") or {}).get("fieldType") or {}).get("id")
+            if isinstance(field_type_id, str):
+                arity = _FIELD_TYPE_ARITY_SUFFIX.search(field_type_id)
+                if arity:
+                    return arity.group(1) == "*"
+        return None
+
+    def _project_to_issue_field_type(self, project_field_type: str, is_multi_value: bool | None) -> str | None:
         """Convert project field type to issue field type.
 
         Args:
             project_field_type: The project field type string
+            is_multi_value: Whether the field holds several values, as the server reports
+                it, or None when the server did not say. Deliberately has no default: a
+                default of False would make "not asked" indistinguishable from "holds one
+                value" for any caller that forgot the argument, which is the conflation
+                this method exists to keep apart.
 
         Returns:
             The corresponding issue field type string, or None when the project type
@@ -694,28 +847,24 @@ class ProjectService(BaseService):
             guess is rejected by the server as a type error, which is far harder to
             diagnose than an explicit refusal here.
         """
-        from ..custom_field_types import IssueCustomFieldTypes, ProjectCustomFieldTypes
+        # The project `$type` names the *kind* of field and carries no multiplicity, so a
+        # bundle-backed kind maps to a (single, multi) pair chosen by what the field itself
+        # reports. The two vocabularies are not parallel: a version field is
+        # "VersionProjectCustomField" on the project side, and the issue side spells it
+        # either way depending on the field — the same kind is single-valued in one project
+        # and multi-valued in another, so nothing here can decide it.
+        bundle_kinds = _BUNDLE_ISSUE_FIELD_TYPES
+        if project_field_type in bundle_kinds:
+            # Unreported multiplicity leaves the issue type genuinely undecidable, so the
+            # refusal happens here rather than as a wrong single/multi pick downstream.
+            if is_multi_value is None:
+                return None
+            single, multi = bundle_kinds[project_field_type]
+            return multi if is_multi_value else single
 
-        # Keys are the project admin API's spelling (it names the *kind* of field) and
-        # values are the issue-side spelling for the same field. The two vocabularies are
-        # not parallel: a version field is "VersionProjectCustomField" on the project but
-        # "MultiVersionIssueCustomField" on the issue, because it holds several values.
-        #
-        # Multi-valued issue types are mapped but not written by --custom-field, which
-        # takes a single value; they surface as an explicit refusal rather than a payload
-        # the server would reject. Anything absent here returns None for the same reason.
+        # Kinds that are always single-valued, or that have no single/multi distinction.
         mapping = {
-            ProjectCustomFieldTypes.ENUM: IssueCustomFieldTypes.SINGLE_ENUM,
-            ProjectCustomFieldTypes.MULTI_ENUM: IssueCustomFieldTypes.MULTI_ENUM,
-            ProjectCustomFieldTypes.OWNED: IssueCustomFieldTypes.SINGLE_OWNED,
-            ProjectCustomFieldTypes.MULTI_OWNED: IssueCustomFieldTypes.MULTI_OWNED,
             ProjectCustomFieldTypes.STATE: IssueCustomFieldTypes.STATE,
-            ProjectCustomFieldTypes.SINGLE_USER: IssueCustomFieldTypes.SINGLE_USER,
-            ProjectCustomFieldTypes.MULTI_USER: IssueCustomFieldTypes.MULTI_USER,
-            ProjectCustomFieldTypes.SINGLE_VERSION: IssueCustomFieldTypes.MULTI_VERSION,
-            ProjectCustomFieldTypes.MULTI_VERSION: IssueCustomFieldTypes.MULTI_VERSION,
-            ProjectCustomFieldTypes.SINGLE_BUILD: IssueCustomFieldTypes.SINGLE_BUILD,
-            ProjectCustomFieldTypes.MULTI_BUILD: IssueCustomFieldTypes.MULTI_BUILD,
             ProjectCustomFieldTypes.TEXT: IssueCustomFieldTypes.TEXT,
             ProjectCustomFieldTypes.INTEGER: IssueCustomFieldTypes.INTEGER,
         }

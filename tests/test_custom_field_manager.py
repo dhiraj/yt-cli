@@ -10,7 +10,13 @@ from youtrack_cli.custom_field_types import (
     ProjectCustomFieldTypes,
     get_display_name,
 )
-from youtrack_cli.exceptions import UnsupportedCustomFieldTypeError
+from youtrack_cli.exceptions import (
+    CustomFieldMultiplicityUnknownError,
+    CustomFieldUnresolvedReason,
+    CustomFieldValueCountError,
+    CustomFieldValueTypeError,
+    UnsupportedCustomFieldTypeError,
+)
 
 
 class TestCustomFieldTypes:
@@ -28,21 +34,31 @@ class TestCustomFieldTypes:
     def test_project_custom_field_types(self):
         """Test project custom field type constants.
 
-        The project vocabulary names the *kind* of field. These must stay distinct from
-        the issue-side spellings: a project type written like its issue counterpart
-        ("SingleUserProjectCustomField") never matches a real API response, and the
-        lookup that consumes these then silently falls through to a default.
+        The project vocabulary names the *kind* of field and nothing more. Two rules
+        follow from that, and both are load-bearing: a project type written like its
+        issue counterpart ("SingleUserProjectCustomField") never matches a real API
+        response, and a "Multi...ProjectCustomField" never matches one either --
+        multiplicity is reported on the field's `fieldType`, not in the kind's name. A
+        constant naming either describes a response the API does not produce.
         """
         assert ProjectCustomFieldTypes.ENUM == "EnumProjectCustomField"
-        assert ProjectCustomFieldTypes.MULTI_ENUM == "MultiEnumProjectCustomField"
         assert ProjectCustomFieldTypes.STATE == "StateProjectCustomField"
         assert ProjectCustomFieldTypes.OWNED == "OwnedProjectCustomField"
-        assert ProjectCustomFieldTypes.MULTI_OWNED == "MultiOwnedProjectCustomField"
-        assert ProjectCustomFieldTypes.SINGLE_USER == "UserProjectCustomField"
-        assert ProjectCustomFieldTypes.MULTI_USER == "MultiUserProjectCustomField"
-        assert ProjectCustomFieldTypes.SINGLE_VERSION == "VersionProjectCustomField"
-        assert ProjectCustomFieldTypes.SINGLE_BUILD == "BuildProjectCustomField"
-        assert ProjectCustomFieldTypes.MULTI_OWNED == "MultiOwnedProjectCustomField"
+        assert ProjectCustomFieldTypes.USER == "UserProjectCustomField"
+        assert ProjectCustomFieldTypes.VERSION == "VersionProjectCustomField"
+        assert ProjectCustomFieldTypes.BUILD == "BuildProjectCustomField"
+
+    def test_project_vocabulary_names_no_multiplicity(self):
+        """No project constant may claim multiplicity, because none carries it.
+
+        A `Multi*ProjectCustomField` constant is not merely unused: it invites a lookup
+        keyed on multiplicity, which then matches nothing and falls through to whatever
+        the miss defaults to.
+        """
+        names = [name for name in vars(ProjectCustomFieldTypes) if not name.startswith("_")]
+        assert not [name for name in names if "MULTI" in name.upper()]
+        values = {v for k, v in vars(ProjectCustomFieldTypes).items() if not k.startswith("_") and isinstance(v, str)}
+        assert not [value for value in values if "Multi" in value]
 
     def test_project_types_are_not_issue_spellings(self):
         """No project constant may reuse an issue-side type name."""
@@ -65,15 +81,30 @@ class TestCustomFieldTypes:
     def test_get_display_name(self):
         """Test display name formatting."""
         assert get_display_name("SingleEnumIssueCustomField") == "Single Enum"
-        assert get_display_name("MultiUserProjectCustomField") == "Multi User"
+        assert get_display_name("MultiUserIssueCustomField") == "Multi User"
+        assert get_display_name("UserProjectCustomField") == "User"
         assert get_display_name("UnknownType") == "UnknownType"
 
     def test_field_type_display_map_completeness(self):
         """Test that all field types have display mappings."""
         # Test some key field types
         assert "SingleEnumIssueCustomField" in FIELD_TYPE_DISPLAY_MAP
-        assert "MultiUserProjectCustomField" in FIELD_TYPE_DISPLAY_MAP
+        assert "MultiUserIssueCustomField" in FIELD_TYPE_DISPLAY_MAP
         assert FIELD_TYPE_DISPLAY_MAP["SingleEnumIssueCustomField"] == "Single Enum"
+
+    def test_display_map_covers_every_declared_type(self):
+        """Every constant in both vocabularies must resolve to a name of its own.
+
+        A constant added without a display entry renders as its raw API string, which
+        is the one output a reader cannot act on -- so the two classes are compared
+        against the map rather than spot-checked.
+        """
+        for vocabulary in (IssueCustomFieldTypes, ProjectCustomFieldTypes):
+            for name, value in vars(vocabulary).items():
+                if name.startswith("_") or not isinstance(value, str):
+                    continue
+                assert value in FIELD_TYPE_DISPLAY_MAP, f"{vocabulary.__name__}.{name} has no display name"
+                assert get_display_name(value) != value, f"{vocabulary.__name__}.{name} renders as its raw type"
 
 
 class TestCustomFieldManager:
@@ -298,15 +329,24 @@ class TestCustomFieldManager:
         assert result == {}
 
     def test_is_multi_value_field(self):
-        """Test checking if field type is multi-value."""
+        """Test checking if field type is multi-value.
+
+        Only the issue-side vocabulary answers this: the project admin API names the
+        kind of a field and reports multiplicity on the field's `fieldType`, so there is
+        no project-side spelling to ask about. The project rows below are the negative
+        case -- a project kind asked here is answered False whatever the field is,
+        which is why discovery reads `isMultiValue` instead.
+        """
         assert CustomFieldManager.is_multi_value_field("MultiEnumIssueCustomField") is True
         assert CustomFieldManager.is_multi_value_field("MultiUserIssueCustomField") is True
-        assert CustomFieldManager.is_multi_value_field("MultiEnumProjectCustomField") is True
-        assert CustomFieldManager.is_multi_value_field("MultiUserProjectCustomField") is True
+        assert CustomFieldManager.is_multi_value_field("MultiVersionIssueCustomField") is True
+        assert CustomFieldManager.is_multi_value_field("MultiBuildIssueCustomField") is True
+        assert CustomFieldManager.is_multi_value_field("MultiOwnedIssueCustomField") is True
 
         assert CustomFieldManager.is_multi_value_field("SingleEnumIssueCustomField") is False
         assert CustomFieldManager.is_multi_value_field("SingleUserIssueCustomField") is False
         assert CustomFieldManager.is_multi_value_field("StateIssueCustomField") is False
+        assert CustomFieldManager.is_multi_value_field("VersionProjectCustomField") is False
 
     def test_extract_dict_value_priority_order(self):
         """Test that _extract_dict_value follows priority order."""
@@ -354,11 +394,12 @@ class TestCreateFieldByType:
     """Test payload construction from discovered field information."""
 
     @staticmethod
-    def _info(project_type, issue_type, element_type=None):
+    def _info(project_type, issue_type, element_type=None, unresolved=None):
         return {
             "project_field_type": project_type,
             "issue_field_type": issue_type,
             "bundle_element_type": element_type,
+            "unresolved_reason": unresolved,
         }
 
     @pytest.mark.parametrize(
@@ -395,6 +436,29 @@ class TestCreateFieldByType:
             CustomFieldManager.create_field_by_type(self._info("XProjectCustomField", issue_type), "F", "v") == expected
         )
 
+    def test_numeric_and_state_fields_take_their_own_value_shape(self):
+        """A numeric field is coerced to a number; a state field is bundle-backed.
+
+        Neither is bundle-shaped in the same way as the kinds above, and both take a
+        single value -- so the value each one puts on the wire is pinned here rather
+        than assumed to be a bundle element.
+        """
+        assert CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.INTEGER, IssueCustomFieldTypes.INTEGER),
+            "Story Points",
+            ["8"],
+        ) == {"$type": "SimpleIssueCustomField", "name": "Story Points", "value": 8}
+
+        assert CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.STATE, IssueCustomFieldTypes.STATE),
+            "State",
+            ["In Progress"],
+        ) == {
+            "$type": "StateIssueCustomField",
+            "name": "State",
+            "value": {"$type": "StateBundleElement", "name": "In Progress"},
+        }
+
     def test_owned_field_uses_its_own_type_and_bundle(self):
         """An owned field is not enum-shaped: it has its own issue type and value type."""
         result = CustomFieldManager.create_field_by_type(
@@ -419,16 +483,321 @@ class TestCreateFieldByType:
         )
         assert result["value"]["$type"] == CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT
 
-    def test_multi_valued_type_is_refused_with_a_reason(self):
-        """A version field is multi-valued on the issue, so one value cannot express it."""
-        with pytest.raises(UnsupportedCustomFieldTypeError) as exc:
+    def test_multi_valued_type_is_written_as_a_list(self):
+        """A field that holds several takes a list, so one value is a one-element list.
+
+        This is the case the CLI used to refuse outright. It is writable, and refusing it
+        sent users to the web UI for a field the API answers exactly.
+        """
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.VERSION, IssueCustomFieldTypes.MULTI_VERSION),
+            "Fix versions",
+            "1.0",
+        )
+        assert result == {
+            "$type": "MultiVersionIssueCustomField",
+            "name": "Fix versions",
+            "value": [{"$type": "VersionBundleElement", "name": "1.0"}],
+        }
+
+    @pytest.mark.parametrize(
+        ("project_type", "issue_type", "expected_type", "element_type", "value_key"),
+        [
+            (
+                ProjectCustomFieldTypes.ENUM,
+                IssueCustomFieldTypes.MULTI_ENUM,
+                "MultiEnumIssueCustomField",
+                "EnumBundleElement",
+                "name",
+            ),
+            (
+                ProjectCustomFieldTypes.USER,
+                IssueCustomFieldTypes.MULTI_USER,
+                "MultiUserIssueCustomField",
+                "User",
+                "login",
+            ),
+            (
+                ProjectCustomFieldTypes.VERSION,
+                IssueCustomFieldTypes.MULTI_VERSION,
+                "MultiVersionIssueCustomField",
+                "VersionBundleElement",
+                "name",
+            ),
+            (
+                ProjectCustomFieldTypes.BUILD,
+                IssueCustomFieldTypes.MULTI_BUILD,
+                "MultiBuildIssueCustomField",
+                "BuildBundleElement",
+                "name",
+            ),
+            (
+                ProjectCustomFieldTypes.OWNED,
+                IssueCustomFieldTypes.MULTI_OWNED,
+                "MultiOwnedIssueCustomField",
+                "OwnedBundleElement",
+                "name",
+            ),
+        ],
+    )
+    def test_every_multi_valued_kind_keeps_its_own_value_type(
+        self, project_type, issue_type, expected_type, element_type, value_key
+    ):
+        """Each multi-valued kind carries its own element type and its own value key.
+
+        An owned value sent as an enum element is rejected as a type mismatch, and a
+        user value is a login rather than a name, so the list form is only correct if it
+        keeps both of the things the single-valued form gets from the kind.
+        """
+        result = CustomFieldManager.create_field_by_type(self._info(project_type, issue_type), "F", ["a", "b"])
+        assert result["$type"] == expected_type
+        assert [element["$type"] for element in result["value"]] == [element_type, element_type]
+        assert [element[value_key] for element in result["value"]] == ["a", "b"]
+
+    def test_multi_user_values_are_resolved_by_login(self):
+        """A user value is a login, and the list form is no different from the single one."""
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.USER, IssueCustomFieldTypes.MULTI_USER),
+            "Reviewers",
+            ["ann", "bo"],
+        )
+        assert result["value"] == [
+            {"$type": "User", "login": "ann"},
+            {"$type": "User", "login": "bo"},
+        ]
+
+    def test_discovered_element_type_is_used_for_multi_enum_fields(self):
+        """A bundle that reports its element type is authoritative for a multi enum too."""
+        result = CustomFieldManager.create_field_by_type(
+            self._info(
+                ProjectCustomFieldTypes.ENUM,
+                IssueCustomFieldTypes.MULTI_ENUM,
+                element_type="StateBundleElement",
+            ),
+            "Sprint",
+            ["S1"],
+        )
+        assert result["value"] == [{"$type": "StateBundleElement", "name": "S1"}]
+
+    def test_empty_bundle_defaults_the_multi_enum_element_type(self):
+        """An empty bundle reports nothing, so the default stands -- as it does for single."""
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.ENUM, IssueCustomFieldTypes.MULTI_ENUM, element_type=None),
+            "Sprint",
+            ["S1"],
+        )
+        assert result["value"] == [{"$type": "EnumBundleElement", "name": "S1"}]
+
+    @pytest.mark.parametrize(
+        ("project_type", "issue_type"),
+        [
+            (ProjectCustomFieldTypes.USER, IssueCustomFieldTypes.SINGLE_USER),
+            (ProjectCustomFieldTypes.OWNED, IssueCustomFieldTypes.SINGLE_OWNED),
+            (ProjectCustomFieldTypes.VERSION, IssueCustomFieldTypes.SINGLE_VERSION),
+            (ProjectCustomFieldTypes.BUILD, IssueCustomFieldTypes.SINGLE_BUILD),
+            (ProjectCustomFieldTypes.ENUM, IssueCustomFieldTypes.SINGLE_ENUM),
+            (ProjectCustomFieldTypes.TEXT, IssueCustomFieldTypes.TEXT),
+            (ProjectCustomFieldTypes.INTEGER, IssueCustomFieldTypes.INTEGER),
+            (ProjectCustomFieldTypes.STATE, IssueCustomFieldTypes.STATE),
+        ],
+    )
+    def test_several_values_for_a_single_valued_field_are_refused(self, project_type, issue_type):
+        """Every value given is a statement, so all but the last cannot be silently dropped.
+
+        Keeping the last would report success for a request that did not say what it
+        meant, and the caller would have no way to know a value was dropped.
+        """
+        with pytest.raises(CustomFieldValueCountError) as exc:
+            CustomFieldManager.create_field_by_type(self._info(project_type, issue_type), "Repo", ["a", "b"])
+        message = str(exc.value)
+        assert "2 were given" in message
+        assert "'a'" in message and "'b'" in message
+
+    def test_a_single_value_for_a_single_valued_field_is_unchanged(self):
+        """The one-value case must not be caught by the count refusal."""
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.VERSION, IssueCustomFieldTypes.SINGLE_VERSION), "F", ["1.0"]
+        )
+        assert result["value"] == {"$type": "VersionBundleElement", "name": "1.0"}
+
+    def test_no_values_at_all_is_refused_rather_than_writing_an_empty_field(self):
+        """An empty list is not a request the caller can have meant.
+
+        `-cf "Field="` is rejected at the CLI boundary, so an empty list here means a
+        caller built one -- and writing it would clear a field on the strength of nothing.
+        """
+        with pytest.raises(CustomFieldValueCountError):
             CustomFieldManager.create_field_by_type(
-                self._info(ProjectCustomFieldTypes.SINGLE_VERSION, IssueCustomFieldTypes.MULTI_VERSION),
-                "Fix versions",
-                "1.0",
+                self._info(ProjectCustomFieldTypes.ENUM, IssueCustomFieldTypes.SINGLE_ENUM), "Repo", []
             )
-        assert "several values" in str(exc.value)
-        assert "Fix versions" in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "issue_type",
+        [IssueCustomFieldTypes.SINGLE_ENUM, IssueCustomFieldTypes.MULTI_VERSION],
+    )
+    def test_the_empty_value_refusal_does_not_claim_what_the_field_holds(self, issue_type):
+        """The message must not assert a multiplicity it has not been told.
+
+        Wording the empty case as "it holds a single value" is false for a multi-valued
+        field, and the advice that would follow it ("pass one value") is wrong for
+        exactly that field -- so the message states only that no value arrived.
+        """
+        with pytest.raises(CustomFieldValueCountError) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(ProjectCustomFieldTypes.VERSION, issue_type), "Fix versions", []
+            )
+        message = str(exc.value)
+        assert "no value was given" in message
+        assert "single value" not in message
+        assert "0 were given" not in message
+
+    @pytest.mark.parametrize(
+        ("project_type", "field_name", "unresolved", "expected"),
+        [
+            # A kind this CLI cannot write, whatever the value.
+            ("DateProjectCustomField", "Due", None, UnsupportedCustomFieldTypeError),
+            # A bundle-backed kind whose multiplicity the server did not report.
+            (
+                ProjectCustomFieldTypes.ENUM,
+                "Sprint",
+                CustomFieldUnresolvedReason.MULTIPLICITY,
+                CustomFieldMultiplicityUnknownError,
+            ),
+        ],
+    )
+    def test_an_unresolved_field_is_blamed_before_an_absent_value(self, project_type, field_name, unresolved, expected):
+        """No value at all must not outrank a field that cannot be written anyway.
+
+        Both refusals send nothing, so only the diagnosis is at stake -- and the wrong
+        one sends the reader after a value they never supplied, with the real cause
+        surfacing only on the next attempt. Reachable: `yt batch create --file` forwards
+        an empty JSON list verbatim, since it filters only `None`.
+
+        The two rows use kinds discovery can actually produce those reasons for: a date
+        field resolves to no issue type, and a bundle-backed kind is the only one whose
+        unreported multiplicity is reported as such.
+        """
+        with pytest.raises(expected) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(project_type, None, unresolved=unresolved), field_name, []
+            )
+        assert "no value was given" not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (8, 8),
+            (8.5, 8.5),
+            ("8", 8),
+            (["8"], 8),
+        ],
+    )
+    def test_a_numeric_value_is_one_value_not_something_to_iterate(self, value, expected):
+        """A non-sequence is one value whatever its type.
+
+        `yt batch create --file items.json` forwards every non-null field from a JSON row
+        verbatim, so a numeric custom field arrives as a number. Treating anything that is
+        not a string as a list of values made that raise `TypeError: 'int' object is not
+        iterable`, which is not a refusal and so escaped the handlers that name the field.
+        """
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.INTEGER, IssueCustomFieldTypes.INTEGER), "Story Points", value
+        )
+        assert result["$type"] == "SimpleIssueCustomField"
+        # Compared by type as well as value: `8 == 8.0`, so an equality check alone would
+        # pass against an implementation that coerced every number to a float.
+        assert result["value"] == expected
+        assert type(result["value"]) is type(expected)
+
+    @pytest.mark.parametrize(
+        ("value", "described"),
+        [
+            (True, "bool"),
+            ({"a": 1}, "dict"),
+            (None, "NoneType"),
+            (["a", ["b"]], "list"),
+        ],
+    )
+    def test_a_value_no_builder_can_state_is_refused(self, value, described):
+        """Refused rather than coerced, and the message names the type it was given.
+
+        A bool is an `int` to `isinstance`, so a numeric field would otherwise take `true`
+        as 1 and report success; an object would be stringified. `yt batch` forwards every
+        non-null field of a JSON row verbatim, so these arrive rather than being caught
+        at the command line.
+        """
+        with pytest.raises(CustomFieldValueTypeError) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(ProjectCustomFieldTypes.INTEGER, IssueCustomFieldTypes.INTEGER), "Effort", value
+            )
+        message = str(exc.value)
+        assert described in message
+        assert "Effort" in message
+
+    def test_an_unsupported_field_is_blamed_before_its_values_are(self):
+        """A field this CLI cannot write is the real cause, whatever the value looks like.
+
+        Reporting the value instead points the reader at their input file, and the real
+        cause only surfaces on the next attempt -- with the same result and less
+        information.
+        """
+        with pytest.raises(UnsupportedCustomFieldTypeError) as exc:
+            CustomFieldManager.create_field_by_type(self._info("DateProjectCustomField", None), "Due", {"year": 2026})
+        assert "DateProjectCustomField" in str(exc.value)
+        assert "dict" not in str(exc.value)
+
+    def test_unreported_multiplicity_is_also_blamed_before_the_values(self):
+        with pytest.raises(CustomFieldMultiplicityUnknownError) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(
+                    ProjectCustomFieldTypes.ENUM,
+                    None,
+                    unresolved=CustomFieldUnresolvedReason.MULTIPLICITY,
+                ),
+                "Sprint",
+                {"name": "S1"},
+            )
+        assert "one value or several" in str(exc.value)
+        assert "dict" not in str(exc.value)
+
+    @pytest.mark.parametrize("value", [b"ab", bytearray(b"ab"), memoryview(b"ab")])
+    def test_byte_like_values_are_refused_rather_than_read_as_several_numbers(self, value):
+        """`bytes` is excluded from the sequence gate, so its siblings must be too.
+
+        `bytearray(b"ab")` is a `Sequence` of `int` and not `bytes`, so it was expanded
+        into two values -- and written as bundle elements named 97 and 98.
+        """
+        with pytest.raises(CustomFieldValueTypeError):
+            CustomFieldManager.create_field_by_type(
+                self._info(ProjectCustomFieldTypes.VERSION, IssueCustomFieldTypes.MULTI_VERSION),
+                "Fix versions",
+                value,
+            )
+
+    def test_a_tuple_of_values_is_treated_as_several_values(self):
+        """Sequences are read as value lists, whatever sequence type carries them."""
+        result = CustomFieldManager.create_field_by_type(
+            self._info(ProjectCustomFieldTypes.VERSION, IssueCustomFieldTypes.MULTI_VERSION),
+            "Fix versions",
+            ("1.0", "1.1"),
+        )
+        assert [element["name"] for element in result["value"]] == ["1.0", "1.1"]
+
+    def test_unreported_multiplicity_is_refused_as_its_own_cause(self):
+        """Naming it "unknown type" would blame the vocabulary for a missing server field."""
+        with pytest.raises(CustomFieldMultiplicityUnknownError) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(
+                    ProjectCustomFieldTypes.ENUM,
+                    None,
+                    unresolved=CustomFieldUnresolvedReason.MULTIPLICITY,
+                ),
+                "Sprint",
+                "S1",
+            )
+        message = str(exc.value)
+        assert "one value or several" in message
+        assert "EnumProjectCustomField" in message
 
     def test_unmappable_type_raises_instead_of_guessing_enum(self):
         """Refusing is the point: a guessed enum is rejected by the server as a type error."""

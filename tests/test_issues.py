@@ -2193,21 +2193,20 @@ class TestCreateAppliesTagsAndNamesTheIssue:
         from youtrack_cli.commands.issues import _apply_tags  # noqa: F401  (import guard)
 
         # The shape the manager returns: internal id inside `data`, readable id beside it.
-        result = {"status": "success", "message": "Issue PROJ-9 created successfully",
-                  "data": {"id": "3-9", "$type": "Issue"}, "friendly_id": "PROJ-9"}
-        issue_id = (result["data"].get("idReadable")
-                    or result.get("friendly_id")
-                    or result["data"].get("id", "N/A"))
+        result = {
+            "status": "success",
+            "message": "Issue PROJ-9 created successfully",
+            "data": {"id": "3-9", "$type": "Issue"},
+            "friendly_id": "PROJ-9",
+        }
+        issue_id = result["data"].get("idReadable") or result.get("friendly_id") or result["data"].get("id", "N/A")
         assert issue_id == "PROJ-9", "the printed id must agree with the success message"
 
     def test_it_still_falls_back_when_no_readable_id_was_resolved(self):
         # A create whose follow-up read failed has only the internal id. Reporting that is
         # better than reporting nothing.
-        result = {"status": "success", "message": "Issue created successfully",
-                  "data": {"id": "3-9", "$type": "Issue"}}
-        issue_id = (result["data"].get("idReadable")
-                    or result.get("friendly_id")
-                    or result["data"].get("id", "N/A"))
+        result = {"status": "success", "message": "Issue created successfully", "data": {"id": "3-9", "$type": "Issue"}}
+        issue_id = result["data"].get("idReadable") or result.get("friendly_id") or result["data"].get("id", "N/A")
         assert issue_id == "3-9"
 
     def test_tags_are_applied_after_a_successful_create(self):
@@ -2232,11 +2231,9 @@ class TestCreateAppliesTagsAndNamesTheIssue:
 
         console = Mock()
         manager = Mock()
-        manager.add_tag = Mock(return_value={"status": "error",
-                                             "message": "Tag 'nope' not found."})
+        manager.add_tag = Mock(return_value={"status": "error", "message": "Tag 'nope' not found."})
 
-        with patch("asyncio.run", return_value={"status": "error",
-                                                "message": "Tag 'nope' not found."}):
+        with patch("asyncio.run", return_value={"status": "error", "message": "Tag 'nope' not found."}):
             applied = _apply_tags(console, manager, "PROJ-9", ("nope",))
 
         # A dropped tag is a partial success, and the command must exit non-zero for it —
@@ -2520,3 +2517,58 @@ class TestNDJSONReportsACap:
         result = self._run([])
         assert result.exit_code == 0
         assert "Reached the cap" not in result.stderr
+
+
+class TestParseCustomFields:
+    """How `--custom-field` arguments become the mapping the service receives.
+
+    The shape matters more than it looks: a repeated field name is now how several
+    values are given for a field that holds several, so "the last one wins" stopped being
+    a harmless convenience and became a silent drop. This had no coverage at all, which
+    is where that behaviour lived.
+    """
+
+    @staticmethod
+    def _parse(specs):
+        from youtrack_cli.commands.issues import _parse_custom_fields
+
+        return _parse_custom_fields(specs)
+
+    def test_a_single_field_becomes_a_one_value_list(self):
+        assert self._parse(("Repo=fastapi",)) == {"Repo": ["fastapi"]}
+
+    def test_repeating_a_name_collects_every_value_in_order(self):
+        assert self._parse(("Fix versions=1.0", "Fix versions=1.1")) == {"Fix versions": ["1.0", "1.1"]}
+
+    def test_several_fields_keep_their_own_values(self):
+        assert self._parse(("State=In Progress", "Repo=fastapi")) == {
+            "State": ["In Progress"],
+            "Repo": ["fastapi"],
+        }
+
+    def test_a_value_containing_an_equals_sign_is_kept_whole(self):
+        # Split on the first `=` only: a value is free text and routinely carries one.
+        assert self._parse(("Build=key=value",)) == {"Build": ["key=value"]}
+
+    def test_a_value_containing_a_comma_is_not_split(self):
+        # Version and build names carry commas ("1.0, hotfix"); splitting on them would
+        # silently invent values the caller never gave.
+        assert self._parse(("Affected versions=1.0, 1.1",)) == {"Affected versions": ["1.0, 1.1"]}
+
+    def test_surrounding_whitespace_is_stripped_from_both_sides(self):
+        assert self._parse(("  Repo =  fastapi  ",)) == {"Repo": ["fastapi"]}
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "NoEqualsSign",
+            "=value",
+            "Field=",
+            "   =value",
+        ],
+    )
+    def test_a_malformed_spec_is_rejected_by_name(self, spec):
+        import click
+
+        with pytest.raises(click.BadParameter):
+            self._parse((spec,))

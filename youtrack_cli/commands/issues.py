@@ -212,19 +212,22 @@ def show_issues_verbose_help(ctx):
     console.print("")
 
 
-def _parse_custom_fields(custom_field_tuples: tuple) -> dict:
+def _parse_custom_fields(custom_field_tuples: tuple) -> dict[str, list[str]]:
     """Parse custom field tuples into dict.
+
+    Repeating a field name collects every value for that field, in the order given.
+    Values are never split on commas, because names routinely contain them ("1.0, hotfix").
 
     Args:
         custom_field_tuples: Tuple of strings in format "FieldName=value"
 
     Returns:
-        Dict mapping field names to values
+        Dict mapping field names to their values
 
     Raises:
         click.BadParameter: If format is invalid
     """
-    parsed = {}
+    parsed: dict[str, list[str]] = {}
     for field_spec in custom_field_tuples:
         if "=" not in field_spec:
             raise click.BadParameter(f'Custom field must be in format "FieldName=value", got: {field_spec}')
@@ -233,7 +236,7 @@ def _parse_custom_fields(custom_field_tuples: tuple) -> dict:
         value = value.strip()
         if not name or not value:
             raise click.BadParameter(f"Field name and value cannot be empty: {field_spec}")
-        parsed[name] = value
+        parsed.setdefault(name, []).append(value)
     return parsed
 
 
@@ -408,7 +411,8 @@ def issues() -> None:
     "--custom-field",
     "-cf",
     multiple=True,
-    help='Custom field in format "FieldName=value" (can be used multiple times)',
+    help='Custom field in format "FieldName=value". Repeat a field name to set several '
+    "values, on a field that holds several",
 )
 @click.option(
     "--tag",
@@ -868,7 +872,8 @@ def list_issues(
     "--custom-field",
     "-cf",
     multiple=True,
-    help='Custom field in format "FieldName=value" (can be used multiple times)',
+    help='Custom field in format "FieldName=value". Repeat a field name to set several values, '
+    "on a field that holds several; the values replace the field's current ones",
 )
 @click.option(
     "--show-details",

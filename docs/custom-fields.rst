@@ -42,16 +42,29 @@ Issue Custom Field Types
 - ``StateIssueCustomField`` - State/workflow fields
 - ``SingleUserIssueCustomField`` - Single user assignment fields
 - ``MultiUserIssueCustomField`` - Multi-user assignment fields
+- ``SingleVersionIssueCustomField`` / ``MultiVersionIssueCustomField`` - Version fields
+- ``SingleBuildIssueCustomField`` / ``MultiBuildIssueCustomField`` - Build fields
+- ``SingleOwnedIssueCustomField`` / ``MultiOwnedIssueCustomField`` - Owned fields
 - ``TextIssueCustomField`` - Text input fields
 
 Project Custom Field Types
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- ``EnumProjectCustomField`` - Project-level enum fields
-- ``MultiEnumProjectCustomField`` - Project-level multi-enum fields
-- ``StateProjectCustomField`` - Project-level state fields
-- ``SingleUserProjectCustomField`` - Project-level single user fields
-- ``MultiUserProjectCustomField`` - Project-level multi-user fields
+The project vocabulary names the **kind** of a field and says nothing about how many values
+it holds. Whether a field is single- or multi-valued is reported on the field's own type, as
+``field.fieldType.isMultiValue`` (also spelled in ``fieldType.id``: ``enum[1]`` vs
+``version[*]``), so one project type backs both a ``Single…`` and a ``Multi…`` issue type.
+
+- ``EnumProjectCustomField`` - enum fields, single- or multi-valued
+- ``StateProjectCustomField`` - State fields (always single-valued)
+- ``OwnedProjectCustomField`` - owned fields, single- or multi-valued
+- ``UserProjectCustomField`` - user fields, single- or multi-valued
+- ``VersionProjectCustomField`` - version fields, single- or multi-valued
+- ``BuildProjectCustomField`` - build fields, single- or multi-valued
+- ``TextProjectCustomField`` - Text fields (always single-valued)
+
+There is no ``MultiEnumProjectCustomField`` or any other ``Multi…ProjectCustomField``: the API
+does not return one, so a mapping keyed on it can never match.
 
 Field Value Types
 ^^^^^^^^^^^^^^^^^
@@ -168,7 +181,10 @@ Best Practices
 
 2. **Handle Fallbacks**: When extracting field values, consider using ``get_field_with_fallback`` to check both built-in and custom fields.
 
-3. **Validate Field Types**: Use ``is_multi_value_field`` to determine if a field supports multiple values.
+3. **Validate Field Types**: Use ``is_multi_value_field`` to determine whether an *issue*-side
+   field type is multi-valued. It only answers for the issue vocabulary -- the project API
+   reports multiplicity on the field's ``fieldType`` instead, so read that flag rather than
+   asking this helper about a project type.
 
 4. **Error Handling**: Custom field operations can fail due to permissions or field configuration. Always handle potential errors gracefully.
 
@@ -191,6 +207,13 @@ Handle fields that can contain multiple values:
     reviewers = CustomFieldManager.create_multi_user_field(
         "Reviewers", ["user1", "user2", "user3"]
     )
+
+    # Build a payload from discovered type information; the value shape follows the field
+    field_info = {"issue_field_type": "MultiVersionIssueCustomField"}
+    versions = CustomFieldManager.create_field_by_type(field_info, "Fix versions", ["1.0", "1.1"])
+
+    # One value is a one-element list on a multi-valued field, not a refusal
+    one = CustomFieldManager.create_field_by_type(field_info, "Fix versions", "1.0")
 
 Project Field Configuration
 ---------------------------
@@ -237,20 +260,27 @@ keyed on the issue-side spelling matches nothing, and the field is then written 
 type that the server rejects. When adding a mapping, key it on the string the project API
 actually returns -- ``GET /api/admin/projects/<key>/customFields`` reports the project
 ``$type``, and ``GET /api/issues/<id>?fields=customFields(name,$type)`` reports what the same
-field is called on an issue. Note the two are not parallel: a version field is
-multi-valued on the issue side even though its project type has no "Multi" in it.
+field is called on an issue.
+
+**The project type does not say whether a field holds one value or several.** The project
+``$type`` names the kind only, and there is no ``MultiEnumProjectCustomField`` to key on --
+that string is never returned. Multiplicity belongs to the field's own type, as
+``field.fieldType.isMultiValue``, and is also spelled in ``fieldType.id``:
+``enum[1]`` and ``user[1]`` hold one value, ``version[*]`` holds several. The same kind is
+therefore single-valued in one project and multi-valued in another, so the kind alone cannot
+decide the issue-side spelling -- read the flag from the field.
 
 **Unsupported field type**: ``yt issues update --custom-field`` and ``yt issues create
 --custom-field`` discover a field's type and refuse the write when they cannot type it,
-rather than sending a guessed payload. Three cases produce that refusal: the project
-cannot be resolved, discovery fails, or the field's type is not one a single value can
-express -- currently multi-valued fields such as *Fix versions*, which holds several
-values on an issue. The error names the field and its type, and no value is sent, so the
-issue is left unchanged. Set those fields through the YouTrack UI, or use a dedicated
-option such as ``--assignee`` where one exists.
+rather than sending a guessed payload. The cases that produce that refusal: the project
+cannot be resolved, discovery fails, the field's kind is not one this CLI can write, the
+field is bundle-backed and the server did not report whether it holds one value or several,
+several values were given for a field that holds one, or no value was given at all. The
+error names the field and the reason, and no value is sent, so the issue is left unchanged. Set those fields through the
+YouTrack UI, or use a dedicated option such as ``--assignee`` where one exists.
 
-Supported by ``--custom-field``: enum, state, user, owned, single build, text and integer
-fields. Not supported: multi-valued fields (enum, user, owned, version, build).
+Supported by ``--custom-field``: enum, state, user, owned, version, build, text and integer
+fields, single- or multi-valued. Not supported: date, period and date-time fields.
 
 **Multi-Value Fields**: Remember that multi-value fields return comma-separated strings when extracted.
 
