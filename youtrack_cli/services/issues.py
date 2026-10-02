@@ -134,6 +134,11 @@ class IssueService(BaseService):
                     # (#780): it is the only stable public name for an issue, so a caller that
                     # asked for one issue as data could not name what it read.
                     "id,idReadable,summary,description,"
+                    # `resolved` because it is the field that says whether the issue shipped,
+                    # which is the one thing a read shaped as "one issue as data" is for: a
+                    # caller asking whether work has landed cannot answer it without this
+                    # field (#498). It is a top-level field and the API returns it.
+                    "resolved,"
                     # No `state`, `priority` or `type`: not top-level issue fields, so the API
                     # drops them. Provable rather than assumed — every issue in a project carries
                     # all three inside `customFields`. Their values are one expansion away.

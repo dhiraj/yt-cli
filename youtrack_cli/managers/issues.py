@@ -158,9 +158,35 @@ class IssueManager:
 
         return result
 
-    async def get_issue(self, issue_id: str) -> dict[str, Any]:
-        """Get issue details with enhanced presentation data."""
-        return await self.issue_service.get_issue(issue_id)
+    async def get_issue(
+        self,
+        issue_id: str,
+        fields: str | None = None,
+        field_profile: str | None = None,
+    ) -> dict[str, Any]:
+        """Get issue details with enhanced presentation data.
+
+        Args:
+            issue_id: Issue ID (idReadable or internal ID)
+            fields: Comma-separated list of fields to return
+            field_profile: Named field profile, used only when `fields` is not given
+
+        Returns:
+            API response with issue data
+        """
+        # A profile is an expansion, so it is resolved here rather than in the service: the
+        # service takes one field expression, and the command layer needs the *expanded*
+        # expression to check the response against what was actually requested (#498).
+        # `fields` wins when both are given, exactly as it does on the list paths.
+        if field_profile and not fields:
+            from ..field_selection import get_field_selector
+
+            fields = get_field_selector().get_fields("issues", field_profile)
+
+        result = await self.issue_service.get_issue(issue_id, fields=fields)
+        if result.get("status") == "success":
+            result["requested_fields"] = fields
+        return result
 
     async def update_issue(
         self,
