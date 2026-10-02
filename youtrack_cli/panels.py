@@ -13,15 +13,16 @@ from .utils import format_timestamp
 
 
 def _format_resolved(value: Any) -> str:
-    """Render `Issue.resolved`, which the API returns as a **boolean**, not a timestamp.
+    """Render `Issue.resolved`: `None` while the issue is open, a Unix-ms timestamp once
+    it is delivered (verified against a live instance — `resolved: null` on an open issue,
+    `resolved: 1790968956470` on the same issue after `--state Verified`).
 
-    `format_timestamp` treats any `int` as a Unix-millisecond timestamp, and `bool` is a
-    subclass of `int` — so handing it the raw field rendered `False` as
-    `1969-12-31 19:00:00`, i.e. every unresolved issue claimed to have been resolved the
-    instant the epoch began. The boolean is therefore read as one here.
-
-    A timestamp-shaped value is still accepted: `show`/`list` can be asked for a different
-    expansion, and a payload that carries a date string renders as one.
+    So the honest path is `format_timestamp`, which is what this falls through to. What it
+    guards is `bool`: `format_timestamp` reads any `int` as milliseconds and `bool` is a
+    subclass of `int`, so a payload carrying `resolved: false` would render
+    `1969-12-31 19:00:00` — a claim that the issue was resolved the instant the epoch began.
+    The live API does not send that, but a hand-built payload or a mock can, and a boolean
+    costs one isinstance to render correctly.
     """
     if isinstance(value, bool):
         return "Yes" if value else "No"

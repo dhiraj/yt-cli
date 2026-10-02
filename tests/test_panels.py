@@ -232,26 +232,37 @@ class TestIssuePanelFunctions:
 
         assert isinstance(panel, Panel)
 
-    def test_resolved_renders_as_a_flag_not_a_timestamp(self):
-        """`Issue.resolved` is a boolean, and `bool` is a subclass of `int`.
+    def test_a_timestamp_resolved_renders_as_a_date(self):
+        """The shape the live API actually sends.
 
-        Routed straight to `format_timestamp` it was read as Unix milliseconds, so an
-        unresolved issue rendered as `1969-12-31 19:00:00` — a claim that it had been
-        resolved the instant the epoch began (#498 added the field to the default read).
+        Verified against a live instance on 2026-10-02: `resolved` is `null` on an open issue
+        and a Unix-millisecond timestamp on the same issue after `--state Verified` — the
+        very value `VAN-498` moved into the default single-issue read.
+        """
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved(1790968956470) == "2026-10-02 15:22:36"
+
+    def test_a_boolean_resolved_is_not_read_as_a_timestamp(self):
+        """`bool` is a subclass of `int`, and `format_timestamp` reads any int as
+        milliseconds — so a `false` would render as `1969-12-31 19:00:00`, a claim that the
+        issue was resolved the instant the epoch began.
+
+        The live API does not send a boolean here, so this guards a hand-built payload and a
+        mock rather than the server; one isinstance is the whole cost of not being wrong.
         """
         from youtrack_cli.panels import _format_resolved
 
         assert _format_resolved(False) == "No"
         assert _format_resolved(True) == "Yes"
 
-    def test_the_panel_renders_an_unresolved_issue_as_unresolved(self):
+    def test_the_panel_renders_the_resolved_timestamp_it_is_given(self):
         """The rendered panel, not just the helper — the wiring is what regressed.
 
-        Asserting `_format_resolved` alone leaves the panel free to stop calling it: routing
-        the field straight back to `format_timestamp` passed every test while putting
-        `1969-12-31 19:00:00` on screen for every unresolved issue.
+        Asserting `_format_resolved` alone leaves the panel free to stop calling it, which is
+        exactly how a wrong value would reach the screen with a green suite.
         """
-        panel = create_issue_details_panel({"id": "TEST-123", "description": "d", "resolved": False})
+        panel = create_issue_details_panel({"id": "TEST-123", "description": "d", "resolved": 1790968956470})
         # `str(panel)` is a repr, so the panel is actually drawn — what a user sees is the
         # only thing this assertion is about. The project's own console is used because the
         # panel is styled with its theme's `info`, which a bare Console cannot resolve.
@@ -260,8 +271,7 @@ class TestIssuePanelFunctions:
             console.print(panel)
         rendered = capture.get()
 
-        assert "No" in rendered
-        assert "1969" not in rendered
+        assert "2026-10-02 15:22:36" in rendered
 
     def test_an_absent_resolved_is_not_a_claim_either_way(self):
         from youtrack_cli.panels import _format_resolved
