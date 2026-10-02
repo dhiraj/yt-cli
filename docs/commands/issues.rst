@@ -548,6 +548,10 @@ instead of parsing a full payload:
 list reads are: if the API drops a requested name, the command says which one and
 exits non-zero rather than handing back a short payload that looks complete.
 
+``--fields`` shapes a *machine* read. With ``--format table`` or ``--format panel``
+it is accepted but the renderer still draws the fields it always draws, so anything
+you left out shows as empty. Use ``--format json`` when you are shaping the response.
+
 A cap is not a total
 ^^^^^^^^^^^^^^^^^^^^
 

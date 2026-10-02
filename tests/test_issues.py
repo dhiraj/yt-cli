@@ -2386,27 +2386,53 @@ class TestIssuesShowFields:
         assert recorded["field_profile"] == "minimal"
 
     def test_a_shaped_read_returns_exactly_what_was_asked_for(self):
-        """The acceptance case: three keys in, three keys out, one issue."""
+        """The acceptance case: three keys in, three keys out, one issue.
+
+        Asserting the payload alone would pass even if the command ignored `--fields`
+        entirely — the stand-in returns whatever it was handed. So the request is asserted
+        too: the two together are the property, that what came back is what was asked for.
+        """
+        expression = "idReadable,resolved,customFields(name,value(name))"
         payload = {
             "idReadable": "VAN-498",
             "resolved": None,
             "customFields": [{"name": "State", "value": {"name": "Submitted"}}],
         }
-        result, _ = self._run(
-            [
-                "issues",
-                "show",
-                "VAN-498",
-                "--format",
-                "json",
-                "--fields",
-                "idReadable,resolved,customFields(name,value(name))",
-            ],
+        result, recorded = self._run(
+            ["issues", "show", "VAN-498", "--format", "json", "--fields", expression],
             data=payload,
         )
 
         assert result.exit_code == 0
+        assert recorded["fields"] == expression
         assert set(json.loads(result.stdout)) == {"idReadable", "resolved", "customFields"}
+
+    def test_the_short_flag_shapes_the_read_too(self):
+        """`-f` is the spelling the list paths use, so it has to work here as well."""
+        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json", "-f", "idReadable,resolved"])
+
+        assert result.exit_code == 0
+        assert recorded["fields"] == "idReadable,resolved"
+
+    def test_a_dropped_field_is_refused_on_a_human_format_too(self):
+        """The refusal is a property of the read, not of `--format json`.
+
+        It was only ever exercised on the json path, which left the table/panel path
+        unprotected: narrowing the check to `format == "json"` would have passed every test.
+        """
+        from youtrack_cli.main import main
+
+        async def recorder(_self, issue_id, fields=None, field_profile=None):
+            # Nothing the caller asked for came back.
+            return {"status": "success", "data": {"$type": "Issue"}, "requested_fields": fields}
+
+        with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
+            result = CliRunner().invoke(
+                main, ["issues", "show", "VAN-498", "--format", "panel", "--fields", "idReadable"]
+            )
+
+        assert result.exit_code != 0
+        assert "idReadable" in result.output
 
     def test_a_field_the_api_dropped_is_refused_rather_than_returned_short(self):
         """Same rule as the list paths: a shaped read that lost a field must not exit 0.

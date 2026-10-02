@@ -231,6 +231,29 @@ class TestIssuePanelFunctions:
 
         assert isinstance(panel, Panel)
 
+    def test_resolved_renders_as_a_flag_not_a_timestamp(self):
+        """`Issue.resolved` is a boolean, and `bool` is a subclass of `int`.
+
+        Routed straight to `format_timestamp` it was read as Unix milliseconds, so an
+        unresolved issue rendered as `1969-12-31 19:00:00` — a claim that it had been
+        resolved the instant the epoch began (#498 added the field to the default read).
+        """
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved(False) == "No"
+        assert _format_resolved(True) == "Yes"
+
+    def test_an_absent_resolved_is_not_a_claim_either_way(self):
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved(None) == "N/A"
+
+    def test_a_timestamp_shaped_resolved_still_renders_as_a_date(self):
+        """A date string is still a valid expansion of the field, and still renders as one."""
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved("2024-01-03T00:00:00Z") == "2024-01-03 00:00:00"
+
     def test_create_custom_fields_panel_empty(self):
         """Test creating a custom fields panel with no fields."""
         custom_fields = []

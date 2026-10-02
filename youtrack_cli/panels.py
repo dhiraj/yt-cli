@@ -12,6 +12,22 @@ from .custom_field_manager import CustomFieldManager
 from .utils import format_timestamp
 
 
+def _format_resolved(value: Any) -> str:
+    """Render `Issue.resolved`, which the API returns as a **boolean**, not a timestamp.
+
+    `format_timestamp` treats any `int` as a Unix-millisecond timestamp, and `bool` is a
+    subclass of `int` — so handing it the raw field rendered `False` as
+    `1969-12-31 19:00:00`, i.e. every unresolved issue claimed to have been resolved the
+    instant the epoch began. The boolean is therefore read as one here.
+
+    A timestamp-shaped value is still accepted: `show`/`list` can be asked for a different
+    expansion, and a payload that carries a date string renders as one.
+    """
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return format_timestamp(value)
+
+
 def _get_assignee_from_issue_data(issue_data: dict[str, Any]) -> str:
     """Get assignee name from either regular field or custom field."""
     # First try the regular assignee field
@@ -316,7 +332,7 @@ def create_issue_details_panel(issue_data: dict[str, Any]) -> Panel:
         "Assignee": _get_assignee_from_issue_data(issue_data),
         "Created": format_timestamp(issue_data.get("created")),
         "Updated": format_timestamp(issue_data.get("updated")),
-        "Resolved": format_timestamp(issue_data.get("resolved")),
+        "Resolved": _format_resolved(issue_data.get("resolved")),
     }
 
     return PanelFactory.create_details_panel(

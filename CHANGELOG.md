@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`yt issues show PROJ-1 --format json --fields 'idReadable,resolved'`). It was the only read
   command that could not shape its response, so the natural way to fetch one issue as data was
   to reach for a different command. A shaped read is verified the same way the list reads are: a
-  requested field the API drops is refused by name, non-zero exit (#498)
+  requested field the API drops is refused by name, non-zero exit. The un-shaped
+  read now carries `resolved` as well, and the issue panel renders that boolean as a
+  flag rather than as a timestamp (#498)
 - ✨ `yt issues create --custom-field` and `yt issues update --custom-field` can now set a
   field that holds several values. Repeat a field name to give it several
   (`-cf "Fix versions=1.0" -cf "Fix versions=1.1"`); on an update those values replace the
