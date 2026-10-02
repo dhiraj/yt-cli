@@ -1,5 +1,6 @@
 """Tests for issue management functionality."""
 
+import asyncio
 import json
 import re
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -2323,6 +2324,223 @@ class TestIssuesShowJSON:
 
         assert result.exit_code == 0
         mock_display.assert_called_once()
+
+
+class TestIssuesShowFields:
+    """`yt issues show` could not shape its response (#498).
+
+    Every other read command in the CLI accepts `--fields`, so an agent could ask for the three
+    keys it needs about one issue — and this one, the command whose whole job is "one issue as
+    data", could not: `--fields` exited 2 with `No such option`. Two changes close that. The
+    option is plumbed through to a service parameter that already existed, and `resolved` joins
+    the service's default field list, because that is the field which says whether the issue
+    shipped — the quieter half of the same defect, and the one the execution tracker needs.
+    """
+
+    def _issue(self):
+        return {"id": "3-620", "idReadable": "VAN-498", "summary": "s", "resolved": None}
+
+    def _run(self, args, data=None):
+        """Invoke the CLI with the manager's `get_issue` replaced by a recorder.
+
+        Patching the manager rather than `asyncio.run` is deliberate: the command builds a
+        coroutine and hands it to the runner, so a mock on the runner can only ever show *that*
+        a coroutine was created, not what it was called with. This seam records the arguments
+        and still lets the real command body run, so the assertions cover the whole path.
+
+        The stand-in echoes `requested_fields` back the way the real manager does — it is the
+        key the command checks the response against, and `test_manager_expands_a_profile_and_
+        reports_what_it_sent` covers where it comes from.
+        """
+        from youtrack_cli.main import main
+
+        recorded: dict = {}
+
+        async def recorder(_self, issue_id, fields=None, field_profile=None):
+            recorded.update(issue_id=issue_id, fields=fields, field_profile=field_profile)
+            return {
+                "status": "success",
+                "data": self._issue() if data is None else data,
+                "requested_fields": fields,
+            }
+
+        runner = CliRunner()
+        with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
+            result = runner.invoke(main, args)
+        return result, recorded
+
+    def test_fields_reaches_the_manager(self):
+        """The option is forwarded, not swallowed — that was the whole defect."""
+        result, recorded = self._run(
+            ["issues", "show", "VAN-498", "--format", "json", "--fields", "idReadable,resolved"]
+        )
+
+        assert result.exit_code == 0
+        assert recorded["fields"] == "idReadable,resolved"
+        assert recorded["field_profile"] is None
+
+    def test_profile_reaches_the_manager(self):
+        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json", "--profile", "minimal"])
+
+        assert result.exit_code == 0
+        assert recorded["field_profile"] == "minimal"
+
+    def test_a_shaped_read_returns_exactly_what_was_asked_for(self):
+        """The acceptance case: three keys in, three keys out, one issue.
+
+        Asserting the payload alone would pass even if the command ignored `--fields`
+        entirely — the stand-in returns whatever it was handed. So the request is asserted
+        too: the two together are the property, that what came back is what was asked for.
+        """
+        expression = "idReadable,resolved,customFields(name,value(name))"
+        payload = {
+            "idReadable": "VAN-498",
+            "resolved": None,
+            "customFields": [{"name": "State", "value": {"name": "Submitted"}}],
+        }
+        result, recorded = self._run(
+            ["issues", "show", "VAN-498", "--format", "json", "--fields", expression],
+            data=payload,
+        )
+
+        assert result.exit_code == 0
+        assert recorded["fields"] == expression
+        assert set(json.loads(result.stdout)) == {"idReadable", "resolved", "customFields"}
+
+    def test_the_short_flag_shapes_the_read_too(self):
+        """`-f` is the spelling the list paths use, so it has to work here as well."""
+        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json", "-f", "idReadable,resolved"])
+
+        assert result.exit_code == 0
+        assert recorded["fields"] == "idReadable,resolved"
+
+    def test_a_dropped_field_is_refused_on_a_human_format_too(self):
+        """The refusal is a property of the read, not of `--format json`.
+
+        It was only ever exercised on the json path, which left the table/panel path
+        unprotected: narrowing the check to `format == "json"` would have passed every test.
+        """
+        from youtrack_cli.main import main
+
+        async def recorder(_self, issue_id, fields=None, field_profile=None):
+            # Nothing the caller asked for came back.
+            return {"status": "success", "data": {"$type": "Issue"}, "requested_fields": fields}
+
+        with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
+            result = CliRunner().invoke(
+                main, ["issues", "show", "VAN-498", "--format", "panel", "--fields", "idReadable"]
+            )
+
+        assert result.exit_code != 0
+        assert "idReadable" in result.output
+
+    def test_a_field_the_api_dropped_is_refused_rather_than_returned_short(self):
+        """Same rule as the list paths: a shaped read that lost a field must not exit 0.
+
+        The API drops an unknown name instead of failing the request, so a typo would otherwise
+        produce a short payload and a success — indistinguishable from a correct short answer.
+        """
+        try:
+            runner_kwargs = {"mix_stderr": False}
+            CliRunner(**runner_kwargs)
+        except TypeError:
+            runner_kwargs = {}
+
+        from youtrack_cli.main import main
+
+        async def recorder(_self, issue_id, fields=None, field_profile=None):
+            # Nothing the caller asked for came back.
+            return {
+                "status": "success",
+                "data": {"$type": "Issue"},
+                "requested_fields": fields,
+            }
+
+        with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
+            result = CliRunner(**runner_kwargs).invoke(
+                main, ["issues", "show", "VAN-498", "--format", "json", "--fields", "idReadable"]
+            )
+
+        assert result.exit_code != 0
+        assert result.stdout.strip() == "", "a refused read must leave nothing for a parser"
+        assert "idReadable" in result.stderr
+
+    def test_an_unshaped_read_is_not_checked(self):
+        """No `--fields` means there is nothing to check against — and nothing to refuse.
+
+        The default read reaches the API with the service's own field list, which the caller never
+        named; running the dropped-field check against it would refuse correct reads.
+        """
+        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json"])
+
+        assert result.exit_code == 0
+        assert recorded["fields"] is None and recorded["field_profile"] is None
+
+    def _manager(self):
+        """The live manager, with only its HTTP layer replaced."""
+        from youtrack_cli.managers.issues import IssueManager
+
+        manager = IssueManager(MagicMock())
+        manager.issue_service = AsyncMock()
+        manager.issue_service.get_issue.return_value = {"status": "success", "data": {}}
+        return manager
+
+    def test_manager_forwards_fields_to_the_service(self):
+        """The manager dropped the argument the service already accepted, so nothing could pass it."""
+        manager = self._manager()
+
+        asyncio.run(manager.get_issue("VAN-498", fields="idReadable,resolved"))
+
+        manager.issue_service.get_issue.assert_awaited_once_with("VAN-498", fields="idReadable,resolved")
+
+    def test_manager_expands_a_profile_and_reports_what_it_sent(self):
+        """The command needs the *expanded* expression to check the response against it."""
+        manager = self._manager()
+
+        result = asyncio.run(manager.get_issue("VAN-498", field_profile="minimal"))
+
+        sent = manager.issue_service.get_issue.await_args.kwargs["fields"]
+        assert result["requested_fields"] == sent
+        assert "idReadable" in sent
+
+    def test_fields_wins_over_a_profile(self):
+        """Same precedence as the list paths: the explicit expression is the caller's intent."""
+        manager = self._manager()
+
+        asyncio.run(manager.get_issue("VAN-498", fields="summary", field_profile="full"))
+
+        assert manager.issue_service.get_issue.await_args.kwargs["fields"] == "summary"
+
+    def _service_with_captured_request(self):
+        """An `IssueService` whose HTTP call is replaced, recording the params it was given.
+
+        Built with `__new__` rather than the real constructor: the point of this test is the
+        field list the method *sends*, and wiring up auth and a client to observe a string would
+        only add ways for the test to fail for the wrong reason.
+        """
+        from youtrack_cli.services.issues import IssueService
+
+        service = IssueService.__new__(IssueService)
+        captured: dict = {}
+
+        async def fake_request(method, path, **kwargs):
+            captured.update(kwargs.get("params") or {})
+            return Mock(status_code=200)
+
+        async def fake_handle(response):
+            return {"status": "success", "data": {}}
+
+        service._make_request = fake_request
+        service._handle_response = fake_handle
+        return service, captured
+
+    def test_a_shaped_read_asks_for_exactly_what_it_was_told(self):
+        """Not the union of the caller's expression and the default list."""
+        service, captured = self._service_with_captured_request()
+
+        asyncio.run(service.get_issue("VAN-498", fields="idReadable,resolved"))
+
+        assert captured["fields"] == "idReadable,resolved"
 
 
 class TestTruncationReporting:

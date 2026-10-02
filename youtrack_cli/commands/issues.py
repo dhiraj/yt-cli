@@ -2015,13 +2015,31 @@ def types(ctx: click.Context, format: str) -> None:
 @issues.command()
 @click.argument("issue_id")
 @click.option(
+    "--fields",
+    "-f",
+    help="Comma-separated list of fields to return. Shapes the response for machine readers; "
+    "without it the service's default field set is used.",
+)
+@click.option(
+    "--profile",
+    type=click.Choice(["minimal", "compact", "standard", "full"]),
+    help="Field selection profile. 'compact' is lean for JSON (core fields + description, no "
+    "customFields); 'minimal' is smallest. Ignored when --fields is given.",
+)
+@click.option(
     "--format",
     type=click.Choice(["table", "panel", "json"], case_sensitive=False),
     default="table",
     help="Output format for issue details (table, panel or json)",
 )
 @click.pass_context
-def show(ctx: click.Context, issue_id: str, format: str) -> None:
+def show(
+    ctx: click.Context,
+    issue_id: str,
+    fields: str | None,
+    profile: str | None,
+    format: str,
+) -> None:
     """Show detailed information about an issue."""
     from ..managers.issues import IssueManager
 
@@ -2032,9 +2050,14 @@ def show(ctx: click.Context, issue_id: str, format: str) -> None:
     print_status(f"📋 Fetching issue '{issue_id}' details...", output_format=format)
 
     try:
-        result = asyncio.run(issue_manager.get_issue(issue_id))
+        result = asyncio.run(issue_manager.get_issue(issue_id, fields=fields, field_profile=profile))
 
         if result["status"] == "success":
+            # A shaped read that silently lost a field is the failure #498 is about, so it is
+            # refused the same way the list paths refuse it: by name, non-zero exit, and with
+            # the reason on stderr so a piped payload stays clean. Unshaped (`--fields` absent)
+            # there is nothing to check against — `requested_fields` is None and this no-ops.
+            _reject_dropped_fields(result.get("requested_fields"), result["data"], format)
             if format == "json":
                 # `click.echo`, not `console.print`: Rich would parse the payload as markup and
                 # silently eat a `[tag]` in a summary (issue #756).

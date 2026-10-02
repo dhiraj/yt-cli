@@ -6,6 +6,7 @@ import pytest
 from rich.console import Console
 from rich.panel import Panel
 
+from youtrack_cli.console import get_console
 from youtrack_cli.panels import (
     PanelFactory,
     PanelGroup,
@@ -230,6 +231,48 @@ class TestIssuePanelFunctions:
         panel = create_issue_details_panel(issue_data)
 
         assert isinstance(panel, Panel)
+
+    def test_resolved_renders_as_a_flag_not_a_timestamp(self):
+        """`Issue.resolved` is a boolean, and `bool` is a subclass of `int`.
+
+        Routed straight to `format_timestamp` it was read as Unix milliseconds, so an
+        unresolved issue rendered as `1969-12-31 19:00:00` — a claim that it had been
+        resolved the instant the epoch began (#498 added the field to the default read).
+        """
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved(False) == "No"
+        assert _format_resolved(True) == "Yes"
+
+    def test_the_panel_renders_an_unresolved_issue_as_unresolved(self):
+        """The rendered panel, not just the helper — the wiring is what regressed.
+
+        Asserting `_format_resolved` alone leaves the panel free to stop calling it: routing
+        the field straight back to `format_timestamp` passed every test while putting
+        `1969-12-31 19:00:00` on screen for every unresolved issue.
+        """
+        panel = create_issue_details_panel({"id": "TEST-123", "description": "d", "resolved": False})
+        # `str(panel)` is a repr, so the panel is actually drawn — what a user sees is the
+        # only thing this assertion is about. The project's own console is used because the
+        # panel is styled with its theme's `info`, which a bare Console cannot resolve.
+        console = get_console()
+        with console.capture() as capture:
+            console.print(panel)
+        rendered = capture.get()
+
+        assert "No" in rendered
+        assert "1969" not in rendered
+
+    def test_an_absent_resolved_is_not_a_claim_either_way(self):
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved(None) == "N/A"
+
+    def test_a_timestamp_shaped_resolved_still_renders_as_a_date(self):
+        """A date string is still a valid expansion of the field, and still renders as one."""
+        from youtrack_cli.panels import _format_resolved
+
+        assert _format_resolved("2024-01-03T00:00:00Z") == "2024-01-03 00:00:00"
 
     def test_create_custom_fields_panel_empty(self):
         """Test creating a custom fields panel with no fields."""

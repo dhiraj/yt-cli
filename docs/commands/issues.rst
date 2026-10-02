@@ -508,6 +508,10 @@ issue carries all three inside ``customFields``, so their absence proves the poi
 rather than suggesting it. Those values remain available through ``customFields``,
 which ``standard`` and ``full`` expand.
 
+``--format ndjson`` skips the check, because a stream that has already emitted
+lines cannot un-emit them — failing part-way would hand back a truncated file
+that looks complete. Use ``json`` or ``csv`` when the expression needs verifying.
+
 One issue as JSON
 ^^^^^^^^^^^^^^^^^
 
@@ -520,14 +524,33 @@ can also return one as data:
 
 The payload carries ``idReadable`` — the only stable public name for an issue —
 along with the summary, description, project, timestamps, tags and links, and each
-link carries its ``linkType`` **name**. Workflow state, priority and type are
+link carries its ``linkType`` **name**. It also carries ``resolved``, the field
+that says whether the issue has shipped. Workflow state, priority and type are
 *not* top-level fields: they appear inside ``customFields``, because the API drops
 them when asked for directly. Progress output goes to standard error, so the
 payload on standard output is safe to pipe straight into a parser.
 
-``--format ndjson`` skips the check, because a stream that has already emitted
-lines cannot un-emit them — failing part-way would hand back a truncated file
-that looks complete. Use ``json`` or ``csv`` when the expression needs verifying.
+Shaping what one issue returns
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``yt issues show`` takes ``--fields`` and ``--profile`` like every other read
+command, so a script can ask for exactly the keys it needs about one issue
+instead of parsing a full payload:
+
+.. code-block:: bash
+
+   yt issues show PROJ-123 --format json --fields 'idReadable,resolved,customFields(name,value(name))'
+
+   # Or pick a named field set:
+   yt issues show PROJ-123 --format json --profile minimal
+
+``--fields`` wins when both are given. A shaped read is verified the same way the
+list reads are: if the API drops a requested name, the command says which one and
+exits non-zero rather than handing back a short payload that looks complete.
+
+``--fields`` shapes a *machine* read. With ``--format table`` or ``--format panel``
+it is accepted but the renderer still draws the fields it always draws, so anything
+you left out shows as empty. Use ``--format json`` when you are shaping the response.
 
 A cap is not a total
 ^^^^^^^^^^^^^^^^^^^^

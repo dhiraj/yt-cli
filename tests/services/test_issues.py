@@ -246,7 +246,7 @@ class TestIssueServiceRetrieval:
 
             expected_params = {
                 "fields": (
-                    "id,idReadable,summary,description,"
+                    "id,idReadable,summary,description,resolved,"
                     "assignee(login,fullName),project(id,name),created,updated,"
                     "tags(name),links(linkType(name),direction,issues(id,summary)),"
                     "customFields(id,name,value(login,fullName,name))"
@@ -257,7 +257,7 @@ class TestIssueServiceRetrieval:
 
     @pytest.mark.asyncio
     async def test_get_issue_default_fields_name_the_issue_and_its_links(self, issue_service, mock_response):
-        """Two properties of the default field list, both of which were wrong.
+        """Three properties of the default field list, all of which were wrong.
 
         `idReadable` is the only stable public name for an issue, so a caller that fetched one
         issue as data had no way to name it (#780 — every profile carries it for this reason).
@@ -265,6 +265,10 @@ class TestIssueServiceRetrieval:
         `linkType(name)` rather than a bare `linkType`: asked for on its own the API returns an
         object carrying only `$type`, so the name never arrived and each renderer read
         `linkType.get("name", "")` and got an empty string. Verified against the live instance.
+
+        `resolved` because it is the field that says whether the issue shipped, which is the one
+        thing a single-issue read is for — the tracker's gate requires the state to be delivered
+        *and* `resolved` to be set, so a read that omits it cannot answer "has this landed?" (#498).
         """
         with (
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
@@ -279,6 +283,7 @@ class TestIssueServiceRetrieval:
             assert "idReadable" in fields, "a single-issue read must be able to name the issue"
             assert "linkType(name)" in fields, "a bare linkType returns no name"
             assert "links(linkType," not in fields, "the bare form is what returns no name"
+            assert "resolved" in fields, "whether the issue shipped must be readable"
 
     @pytest.mark.asyncio
     async def test_get_issue_with_custom_fields(self, issue_service, mock_response):
