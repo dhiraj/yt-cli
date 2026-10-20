@@ -14,7 +14,7 @@ from .auth import AuthManager
 from .cli_utils import AliasedGroup
 from .commands import articles, boards, issues, projects, time, tutorial, users
 from .config import ConfigManager
-from .console import get_console, set_quiet_mode
+from .console import get_console, get_error_console, set_quiet_mode
 from .error_formatting import CommonErrors, format_and_print_error
 from .help_system import check_help_verbose
 from .logging import setup_logging
@@ -165,9 +165,13 @@ def main(
     # Configure console quiet mode
     set_quiet_mode(quiet)
 
-    # Warn once if running on Python 3.10 (EOL; support ends January 2027)
+    # Warn once if running on Python 3.10 (EOL; support ends January 2027).
+    # The warning goes to stderr, not stdout: stdout is this CLI's data
+    # channel, and a machine-readable read must stay parseable -- a warning
+    # printed there corrupts `--format json` and breaks the rule that a
+    # refused read leaves stdout empty.
     if sys.version_info[:2] == (3, 10) and not quiet:
-        get_console().print(
+        get_error_console().print(
             "[yellow]Warning:[/yellow] Python 3.10 has reached end of life. "
             "YouTrack CLI will stop supporting it starting in January 2027. "
             "Please upgrade to Python 3.11 or newer.",

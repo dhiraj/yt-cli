@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 - ⚠️ Python 3.10 has reached end of life. A runtime warning is now shown when
   running under Python 3.10, noting that support will stop in January 2027;
-  upgrade to Python 3.11 or newer (#786)
+  upgrade to Python 3.11 or newer (#786). The warning is written to stderr, so
+  stdout stays a clean data channel for `--format json` and friends
 
 ### Security
 - 🔒 Bumped the transitive dev-group `virtualenv` dependency to 21.14.5,
