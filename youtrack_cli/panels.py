@@ -23,6 +23,15 @@ def _format_resolved(value: Any) -> str:
     `1969-12-31 19:00:00` — a claim that the issue was resolved the instant the epoch began.
     The live API does not send that, but a hand-built payload or a mock can, and a boolean
     costs one isinstance to render correctly.
+
+    The rendering is local time. `format_timestamp` builds it with
+    `datetime.fromtimestamp(timestamp / 1000)`, which is the host's local zone, so one
+    instant renders as a different wall clock on every machine: `1790968956470` renders
+    as `2026-10-02 15:22:36` in a UTC-4 zone, `2026-10-02 12:22:36` in a UTC-7 zone and
+    `2026-10-02 19:22:36` in UTC. A test that asserts a wall-clock string here is a test
+    of the runner's timezone rather than of this function, and it fails on every host
+    outside the one zone the literal was written in. Assert the instant instead: parse the
+    rendering back as local time and compare the epoch seconds.
     """
     if isinstance(value, bool):
         return "Yes" if value else "No"
