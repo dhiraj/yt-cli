@@ -6,6 +6,35 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolate_home(tmp_path_factory):
+    """Redirect the home directory for the whole test session.
+
+    The CLI derives its credential file, its themes directory and its log
+    directory from the home directory, so a test that touches the default
+    configuration path reads and writes the developer's real
+    ``~/.config/youtrack-cli/.env``.  Pointing the home directory at a
+    throwaway one keeps every one of those paths inside the test run.
+
+    This completes the isolation the other fixtures in this file already
+    perform for the remaining credential carriers: the environment variables
+    (``isolate_environment``), the keyring (``isolate_keyring``) and the
+    dotenv loading (``mock_dotenv_loading``).
+    """
+    home = tmp_path_factory.mktemp("home")
+    original = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE")}
+    os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
+    try:
+        yield home
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 @pytest.fixture(scope="function", autouse=True)
 def isolate_environment():
     """Ensure test isolation by saving and restoring environment variables."""

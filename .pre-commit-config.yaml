@@ -67,7 +67,11 @@ repos:
       - id: logout
         name: YouTrack logout
         description: Ensures clean YouTrack auth state for testing
-        entry: echo "y" | uv run yt auth logout
+        # The logout runs against a throwaway home directory and a keyring
+        # backend that stores nothing, so it can only ever clear a throwaway
+        # credential -- never the credential file or keychain entry of the
+        # machine the gate runs on.  See scripts/isolated-credential-env.sh.
+        entry: bash -c 'echo "y" | ./scripts/isolated-credential-env.sh uv run yt auth logout'
         language: system
         pass_filenames: false
         always_run: true
