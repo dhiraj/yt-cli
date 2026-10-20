@@ -27,6 +27,43 @@ def test_main_version() -> None:
     assert result.exit_code == 0
 
 
+@pytest.mark.unit
+def test_python_310_deprecation_warning(monkeypatch) -> None:
+    """Python 3.10 users get an EOL deprecation warning."""
+    monkeypatch.setattr("sys.version_info", (3, 10, 15, "final", 0))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        config_path = Path(temp_dir) / "test_config.env"
+        result = CliRunner().invoke(main, ["--config", str(config_path), "config", "list"])
+    assert "Python 3.10 has reached end of life" in result.output
+    assert "January 2027" in result.output
+
+
+@pytest.mark.unit
+def test_no_deprecation_warning_on_supported_python(monkeypatch) -> None:
+    """Supported Python versions do not get the EOL warning."""
+    monkeypatch.setattr("sys.version_info", (3, 11, 0, "final", 0))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        config_path = Path(temp_dir) / "test_config.env"
+        result = CliRunner().invoke(main, ["--config", str(config_path), "config", "list"])
+    assert "end of life" not in result.output
+
+
+@pytest.mark.unit
+def test_the_deprecation_warning_does_not_reach_stdout(monkeypatch) -> None:
+    """The EOL warning goes to stderr, so stdout stays a clean data channel.
+
+    stdout is this CLI's machine-readable channel: a shaped read must parse
+    from it, and a refused read must leave it empty. A warning printed there
+    breaks both, so the warning is a diagnostic and belongs on stderr.
+    """
+    monkeypatch.setattr("sys.version_info", (3, 10, 15, "final", 0))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        config_path = Path(temp_dir) / "test_config.env"
+        result = CliRunner().invoke(main, ["--config", str(config_path), "config", "list"])
+    assert "Python 3.10 has reached end of life" in result.stderr
+    assert "Python 3.10 has reached end of life" not in result.stdout
+
+
 @pytest.mark.parametrize(
     "command",
     [
