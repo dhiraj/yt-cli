@@ -22,6 +22,24 @@ from youtrack_cli.console import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_console_theme():
+    """Put the global console theme back after every test in this module.
+
+    The console manager the CLI renders through is a module-level singleton, so
+    a theme set here outlives the test that set it unless it is put back. A
+    theme that carries only a couple of styles -- `Theme({"info": "blue"})` is
+    one -- has no `field` style, so a later test that renders a themed panel
+    fails with `rich.errors.MissingStyle` instead of asserting anything. The
+    suite order is randomised, so which test is the victim changes from run to
+    run.
+    """
+    theme = get_console_theme()
+    yield
+    if theme is not None:
+        set_console_theme(theme)
+
+
 @pytest.mark.unit
 class TestThemes:
     """Test theme-related functionality."""

@@ -1,5 +1,6 @@
 """Tests for panel display functionality."""
 
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -238,10 +239,22 @@ class TestIssuePanelFunctions:
         Verified against a live instance on 2026-10-02: `resolved` is `null` on an open issue
         and a Unix-millisecond timestamp on the same issue after `--state Verified` — the
         very value `VAN-498` moved into the default single-issue read.
+
+        The rendering is local time -- `format_timestamp` builds it with
+        `datetime.fromtimestamp`, which is the host's local zone -- so one instant is a
+        different wall clock on every machine: `2026-10-02 15:22:36` in a UTC-4 zone,
+        `2026-10-02 12:22:36` in a UTC-7 zone, `2026-10-02 19:22:36` in UTC. A literal
+        would make this a test of the runner's timezone rather than of the rendering,
+        and it is why this assertion used to fail on every host that is not a UTC-4
+        zone. So the instant is asserted instead: the rendering is parsed back as local
+        time and compared at second precision. `strptime` also rejects any format other
+        than the one the CLI renders, so the shape of the rendering is still pinned.
         """
         from youtrack_cli.panels import _format_resolved
 
-        assert _format_resolved(1790968956470) == "2026-10-02 15:22:36"
+        rendered = _format_resolved(1790968956470)
+
+        assert int(datetime.strptime(rendered, "%Y-%m-%d %H:%M:%S").timestamp()) == 1790968956
 
     def test_a_boolean_resolved_is_not_read_as_a_timestamp(self):
         """`bool` is a subclass of `int`, and `format_timestamp` reads any int as
@@ -261,7 +274,12 @@ class TestIssuePanelFunctions:
 
         Asserting `_format_resolved` alone leaves the panel free to stop calling it, which is
         exactly how a wrong value would reach the screen with a green suite.
+
+        The rendering is local time, so the panel is checked against what the helper
+        produces rather than against a wall-clock literal that only holds on one zone.
         """
+        from youtrack_cli.panels import _format_resolved
+
         panel = create_issue_details_panel({"id": "TEST-123", "description": "d", "resolved": 1790968956470})
         # `str(panel)` is a repr, so the panel is actually drawn — what a user sees is the
         # only thing this assertion is about. The project's own console is used because the
@@ -271,7 +289,7 @@ class TestIssuePanelFunctions:
             console.print(panel)
         rendered = capture.get()
 
-        assert "2026-10-02 15:22:36" in rendered
+        assert _format_resolved(1790968956470) in rendered
 
     def test_an_absent_resolved_is_not_a_claim_either_way(self):
         from youtrack_cli.panels import _format_resolved
