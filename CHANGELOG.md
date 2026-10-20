@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-20
+
 ### Added
 - ✨ `yt issues show` now takes `--fields` and `--profile`, like every other read command, so a
   script can ask for exactly the keys it needs about one issue
@@ -15,8 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to reach for a different command. A shaped read is verified the same way the list reads are: a
   requested field the API drops is refused by name, non-zero exit. The un-shaped
   read now carries `resolved` as well — the field that says whether the issue
-  shipped — and the issue panel renders it without reading a boolean as a
-  timestamp (#498)
+  shipped (#498)
 - ✨ `yt issues create --custom-field` and `yt issues update --custom-field` can now set a
   field that holds several values. Repeat a field name to give it several
   (`-cf "Fix versions=1.0" -cf "Fix versions=1.1"`); on an update those values replace the
@@ -27,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value.
 
 ### Fixed
+- 🐛 The issue panel renders `resolved` without reading a boolean as a timestamp. The
+  field is a Unix-millisecond timestamp — `null` on an open issue, the instant it was
+  resolved otherwise — so it is rendered as that instant rather than as a flag (#498)
 - 🐛 `yt issues update --custom-field` and `yt issues create --custom-field` now
   write each field with the type that field actually reports, so user, owned,
   version and build fields are no longer submitted as an enum payload and
@@ -45,6 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiplicity the server does not report is now refused by name rather than
   guessed, and a field given several values that holds one is refused instead
   of quietly keeping the last (#778, #782)
+
+### Deprecated
+- ⚠️ Python 3.10 has reached end of life. A runtime warning is now shown when
+  running under Python 3.10, noting that support will stop in January 2027;
+  upgrade to Python 3.11 or newer (#786)
+
+### Security
+- 🔒 Bumped the transitive dev-group `virtualenv` dependency to 21.14.5,
+  resolving CVE-2026-102930 (high) and CVE-2026-102938 (medium) (#787)
+- 🔒 Bumped `urllib3` from 2.7.0 to 2.8.0 (#785)
+
+### Changed
+- ℹ️ The version number now matches upstream's `v0.26.0` (released 2026-10-04);
+  the content of this release is this fork's own build. Upstream's `v0.26.0` was
+  merged in and contributes no library behaviour change to it — only dependency
+  pins, the GitHub Actions pins, the Python 3.10 end-of-life warning above, and
+  the version number
+- ℹ️ Upstream's multi-value custom-field fix (PR #783, commit `0d3fd2a`) was
+  **not** taken: this fork had already implemented the same fix before the
+  merge, and more strictly. Upstream's variant logs a warning and keeps the last
+  value when a field that holds one is given several values; this fork refuses
+  the request by name instead, so `-cf "State=Open" -cf "State=Verified"` cannot
+  report success for a request that did not say what it meant (#778, #782)
 
 ## [0.25.1] - 2026-08-04
 
