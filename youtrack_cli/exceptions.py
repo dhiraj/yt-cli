@@ -319,6 +319,56 @@ class CustomFieldValueTypeError(CustomFieldWriteRefusal):
         super().__init__(message, suggestion)
 
 
+class CustomFieldValueUnresolvedError(CustomFieldWriteRefusal):
+    """A value is neither a name nor an id of the field it was given for.
+
+    A bundle-backed field is addressed by its display name or by the id of one of its
+    values, and which of the two a token is comes from the field's own vocabulary --
+    never from the token's shape, because a legal value *name* can look exactly like an
+    id. A token that is in neither list belongs to no value of this field, and saying
+    so is what makes the refusal actionable: the legal values are listed, each with
+    the id it can also be addressed by, so a reader can see which form would have been
+    accepted.
+    """
+
+    def __init__(self, field_name: str, token: str, legal_values: str):
+        self.field_name = field_name
+        self.token = token
+        self.legal_values = legal_values
+
+        if legal_values:
+            message = f"'{token}' is not a valid {field_name}. Valid values: {legal_values}"
+        else:
+            message = f"'{token}' is not a valid {field_name}: the field reports no values"
+        suggestion = (
+            "No value was sent, so the issue is unchanged. A value is addressed by its display name "
+            "or by its id; both are listed above"
+        )
+
+        super().__init__(message, suggestion)
+
+
+class CustomFieldValueAmbiguousError(CustomFieldWriteRefusal):
+    """A token is both a name and an id of the same field, so neither reading can be chosen.
+
+    Vanishingly unlikely, and exactly the case a rule that recognised ids by their
+    shape would get wrong: the token is a legal name *and* a legal id at once, and
+    picking either reading would address a value the caller may not have meant.
+    """
+
+    def __init__(self, field_name: str, token: str):
+        self.field_name = field_name
+        self.token = token
+
+        message = f"'{token}' is both a display name and an id of {field_name}, so it cannot be addressed unambiguously"
+        suggestion = (
+            "No value was sent, so the issue is unchanged. Rename the value so that its display "
+            "name and its id differ, or set it through the YouTrack UI"
+        )
+
+        super().__init__(message, suggestion)
+
+
 class CustomFieldMultiplicityUnknownError(CustomFieldWriteRefusal):
     """The server did not report whether a field holds one value or several.
 

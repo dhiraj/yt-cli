@@ -2,7 +2,7 @@
 
 import pytest
 
-from youtrack_cli.custom_field_manager import CustomFieldManager
+from youtrack_cli.custom_field_manager import CustomFieldManager, resolve_bundle_value
 from youtrack_cli.custom_field_types import (
     FIELD_TYPE_DISPLAY_MAP,
     CustomFieldValueTypes,
@@ -13,8 +13,10 @@ from youtrack_cli.custom_field_types import (
 from youtrack_cli.exceptions import (
     CustomFieldMultiplicityUnknownError,
     CustomFieldUnresolvedReason,
+    CustomFieldValueAmbiguousError,
     CustomFieldValueCountError,
     CustomFieldValueTypeError,
+    CustomFieldValueUnresolvedError,
     UnsupportedCustomFieldTypeError,
 )
 
@@ -805,3 +807,179 @@ class TestCreateFieldByType:
             CustomFieldManager.create_field_by_type(self._info("SomethingNewProjectCustomField", None), "Mystery", "x")
         assert "Mystery" in str(exc.value)
         assert "SomethingNewProjectCustomField" in str(exc.value)
+
+
+class TestResolveBundleValue:
+    """Which form a token is, decided by the field's own vocabulary.
+
+    The form is never decided by the token's shape: a legal value *name* can look
+    exactly like an id, and a rule that recognised ids by their pattern would
+    mis-address such a name.
+    """
+
+    PRIORITY = [
+        {"id": "157-1", "name": "Critical"},
+        {"id": "157-2", "name": "Major"},
+    ]
+
+    def test_a_name_is_a_name(self):
+        assert resolve_bundle_value("Critical", self.PRIORITY, "Priority") == ("name", "Critical")
+
+    def test_an_id_is_an_id(self):
+        assert resolve_bundle_value("157-2", self.PRIORITY, "Priority") == ("id", "157-2")
+
+    def test_an_unknown_token_is_refused(self):
+        with pytest.raises(CustomFieldValueUnresolvedError) as exc:
+            resolve_bundle_value("157-9", self.PRIORITY, "Priority")
+        message = str(exc.value)
+        assert "not a valid Priority" in message
+        assert "Critical (157-1)" in message, "the legal values are named with the ids they answer to"
+
+    def test_a_token_that_is_both_a_name_and_an_id_is_refused(self):
+        """Neither reading can be chosen, so neither is chosen."""
+        vocabulary = [{"id": "157-2", "name": "157-2"}]
+
+        with pytest.raises(CustomFieldValueAmbiguousError) as exc:
+            resolve_bundle_value("157-2", vocabulary, "Priority")
+        assert "ambiguously" in str(exc.value)
+
+    def test_a_field_with_no_values_reports_that_rather_than_a_bare_list(self):
+        with pytest.raises(CustomFieldValueUnresolvedError) as exc:
+            resolve_bundle_value("anything", [], "Fix versions")
+        assert "no values" in str(exc.value)
+
+
+class TestBundleValuesByNameOrId:
+    """What a bundle-backed builder puts on the wire, for both forms of a value.
+
+    An id goes on the wire as the id, not as the name it currently has: the id is the
+    only identifier a rename cannot invalidate, and the CLI caches field discovery for
+    five minutes, so a name resolved through the cache could be a stale one.
+    """
+
+    PRIORITY = [
+        {"id": "157-1", "name": "Critical"},
+        {"id": "157-2", "name": "Major"},
+    ]
+
+    @staticmethod
+    def _info(issue_type, values, element_type=CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT):
+        """A discovered field, with the bundle discovery reported."""
+        return {
+            "project_field_type": ProjectCustomFieldTypes.ENUM,
+            "issue_field_type": issue_type,
+            "bundle_element_type": element_type,
+            "field_details": {"bundle": {"values": values}},
+        }
+
+    def test_an_id_is_written_as_an_id(self):
+        result = CustomFieldManager.create_field_by_type(
+            self._info(IssueCustomFieldTypes.SINGLE_ENUM, self.PRIORITY), "Priority", "157-2"
+        )
+        assert result == {
+            "$type": IssueCustomFieldTypes.SINGLE_ENUM,
+            "name": "Priority",
+            "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+        }
+
+    def test_a_name_is_still_written_as_a_name(self):
+        result = CustomFieldManager.create_field_by_type(
+            self._info(IssueCustomFieldTypes.SINGLE_ENUM, self.PRIORITY), "Priority", "Major"
+        )
+        assert result == {
+            "$type": IssueCustomFieldTypes.SINGLE_ENUM,
+            "name": "Priority",
+            "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "Major"},
+        }
+
+    def test_an_id_of_another_fields_bundle_is_refused_rather_than_written(self):
+        """The most dangerous thing a resolver could do is pass any id through.
+
+        An id belongs to the field whose vocabulary carries it, so writing one against
+        another field is a write to a value that does not exist there.
+        """
+        with pytest.raises(CustomFieldValueUnresolvedError) as exc:
+            CustomFieldManager.create_field_by_type(
+                self._info(IssueCustomFieldTypes.SINGLE_ENUM, self.PRIORITY), "Priority", "159-2"
+            )
+        assert "not a valid Priority" in str(exc.value)
+
+    def test_a_multi_valued_field_takes_a_mix_of_names_and_ids(self):
+        result = CustomFieldManager.create_field_by_type(
+            self._info(IssueCustomFieldTypes.MULTI_ENUM, self.PRIORITY), "Priority", ["Critical", "157-2"]
+        )
+        assert result["value"] == [
+            {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "Critical"},
+            {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+        ]
+
+    def test_a_state_field_by_id(self):
+        states = [{"id": "159-2", "name": "In Progress"}]
+        result = CustomFieldManager.create_field_by_type(
+            self._info(
+                IssueCustomFieldTypes.STATE,
+                states,
+                element_type=CustomFieldValueTypes.STATE_BUNDLE_ELEMENT,
+            ),
+            "State",
+            "159-2",
+        )
+        assert result == {
+            "$type": IssueCustomFieldTypes.STATE,
+            "name": "State",
+            "value": {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "id": "159-2"},
+        }
+
+    def test_one_grammar_both_forms(self):
+        """Both forms address the same field, with the same type, in the same payload.
+
+        The only difference is which key carries the value -- which is the whole claim:
+        there is one grammar for a field value, and a name and an id are two ways of
+        saying the same thing in it.
+        """
+        states = [{"id": "159-2", "name": "In Progress"}]
+        info = self._info(
+            IssueCustomFieldTypes.STATE,
+            states,
+            element_type=CustomFieldValueTypes.STATE_BUNDLE_ELEMENT,
+        )
+
+        by_name = CustomFieldManager.create_field_by_type(info, "State", "In Progress")
+        by_id = CustomFieldManager.create_field_by_type(info, "State", "159-2")
+
+        assert by_name["name"] == by_id["name"] == "State"
+        assert by_name["$type"] == by_id["$type"]
+        assert by_name["value"]["$type"] == by_id["value"]["$type"]
+        assert by_name["value"] == {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "name": "In Progress"}
+        assert by_id["value"] == {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "id": "159-2"}
+
+    def test_a_name_that_looks_like_an_id_stays_a_name(self):
+        """A version field routinely carries names like `2026-1`.
+
+        A rule that recognised ids by their pattern would take `2026-1` for an id and
+        write the wrong thing -- or write nothing at all, because `2026-1` is not an
+        id of that bundle either.
+        """
+        versions = [{"id": "133-24", "name": "2026-1"}]
+        result = CustomFieldManager.create_field_by_type(
+            self._info(
+                IssueCustomFieldTypes.SINGLE_VERSION,
+                versions,
+                element_type=CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT,
+            ),
+            "Fix versions",
+            "2026-1",
+        )
+        assert result["value"] == {"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": "2026-1"}
+
+    def test_a_field_with_no_vocabulary_is_written_by_name(self):
+        """With no values in hand there is no id the token could have meant.
+
+        A field whose bundle reports no values -- a version field with no versions
+        attached, say -- has nothing to resolve against, so the value is written by
+        name and the server stays the authority on whether that name exists.
+        """
+        result = CustomFieldManager.create_field_by_type(
+            self._info(IssueCustomFieldTypes.SINGLE_VERSION, []), "Fix versions", "1.0"
+        )
+        assert result["value"] == {"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": "1.0"}

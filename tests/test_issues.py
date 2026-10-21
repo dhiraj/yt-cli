@@ -2910,6 +2910,108 @@ class TestCustomFieldVocabularyLookup:
 
 
 @pytest.mark.unit
+class TestCustomFieldValueAddressing:
+    """A bundle-backed value may be addressed by its display name or by its stable id.
+
+    The pre-flight vocabulary check has to accept both forms, because both are now
+    writable -- and it has to keep refusing everything else, because a check that lets
+    anything through turns a typo into an opaque server error instead of a local
+    refusal that names the legal values.
+    """
+
+    @staticmethod
+    def _project_field(field_id: str, name: str, values: list[dict]) -> dict:
+        """A record in the shape the admin endpoint actually returns."""
+        return {
+            "$type": "ProjectCustomField",
+            "id": field_id,
+            "field": {"name": name},
+            "bundle": {"values": values},
+        }
+
+    @pytest.fixture
+    def manager(self):
+        from youtrack_cli.managers.issues import IssueManager
+
+        return IssueManager(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_a_value_id_is_accepted(self, manager):
+        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "157-1")
+
+        assert result["valid"] is True, "an id is a value like any other"
+        assert result["message"] == ""
+
+    @pytest.mark.asyncio
+    async def test_a_value_name_is_still_accepted(self, manager):
+        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "Critical")
+
+        assert result["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_token_is_still_refused(self, manager):
+        """The verdict comes first, so a widened check cannot pass this.
+
+        A check that accepted anything would leave the message untested, and the
+        message is the part a caller acts on.
+        """
+        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "Criticial")
+
+        assert result["valid"] is False, "a typo must still be refused locally"
+        assert "not a valid Priority" in result["message"]
+        assert "Critical (157-1)" in result["message"], "the legal values are named, with the ids they answer to"
+
+    @pytest.mark.asyncio
+    async def test_an_id_of_another_fields_bundle_is_refused(self, manager):
+        """An id belongs to the field whose vocabulary carries it, and to no other.
+
+        Writing it against a field that does not hold it is the mistake this rule
+        exists to prevent, so it is refused rather than forwarded to the server.
+        """
+        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "159-2")
+
+        assert result["valid"] is False, "159-2 is a state id, not a priority"
+        assert "not a valid Priority" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_the_vocabulary_read_asks_for_the_ids(self, manager):
+        """The ids have to be in the read, or the check finds none and refuses every id.
+
+        A capability that fails silently is worse than one that is absent: the caller
+        sees a refusal of a legal value and concludes the value is wrong.
+        """
+        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        await manager._validate_custom_field_value("0-1", "Priority", "157-1")
+
+        selector = manager.project_service.get_project_custom_fields.call_args.kwargs["fields"]
+        assert "values(name,id)" in selector, f"the read must ask for the ids: {selector!r}"
+
+
+@pytest.mark.unit
 class TestIssuesCreateContract:
     """What `yt issues create` exits with, and which stream each outcome lands on.
 

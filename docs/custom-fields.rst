@@ -99,6 +99,40 @@ The ``CustomFieldManager`` provides factory methods for creating custom field di
     # Text field
     description_field = CustomFieldManager.create_text_field("Description", "Custom description")
 
+Addressing a Value by Name or by Id
+-----------------------------------
+
+A value of a bundle-backed field -- an enum, a state, a version, a build, an owned value --
+may be addressed by its **display name** or by its **id**. The two are the same write:
+``-cf "State=In Progress"`` and ``-cf "State=159-2"`` set the same value, and the same is
+true of ``--priority``, ``--type`` and ``--state``.
+
+Which of the two a token is comes from the **field's own vocabulary**, never from the
+token's shape. A legal value name can look exactly like an id -- a version field routinely
+carries names like ``2026-1`` -- so a rule that recognised ids by their pattern would
+mis-address such a name.
+
+When the token is an id, **the id goes on the wire**. The id is the only identifier a
+rename cannot invalidate, so a value pinned by id survives a rename of its display name,
+which a write by name does not.
+
+A token that is neither a name nor an id of that field is refused locally, before any
+request is made, and the refusal names the field's legal values -- each with the id it can
+also be addressed by:
+
+.. code-block:: text
+
+    '157-9' is not a valid Priority. Valid values: Show-stopper (157-0), Critical (157-1),
+    Major (157-2), Normal (157-3), Minor (157-4)
+
+A field with no vocabulary of its own to resolve against -- one whose bundle reports no
+values -- has nothing to look a token up in, so the value is written by name and the server
+stays the authority on whether that name exists.
+
+**User fields are not addressed by id.** A user field's value is a ``User`` entity,
+addressed by login, and a project may attach *teams* to the same field, which is a
+different id space. Those values stay login-addressed.
+
 Extracting Field Values
 ------------------------
 

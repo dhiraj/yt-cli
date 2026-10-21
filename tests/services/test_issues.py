@@ -40,6 +40,50 @@ def mock_response():
     return response
 
 
+def _discovered_field(project_id: str, field_name: str) -> dict:
+    """What field discovery reports for the fields these tests write.
+
+    A state field and an enum field are different kinds, and the payload is built from
+    what discovery says -- so the two are told apart here rather than answered with one
+    shape for both.
+    """
+    if field_name == "State":
+        return {
+            "status": "success",
+            "data": {
+                "field_name": "State",
+                "project_field_type": ProjectCustomFieldTypes.STATE,
+                "issue_field_type": IssueCustomFieldTypes.STATE,
+                "bundle_element_type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT,
+            },
+        }
+    return {
+        "status": "success",
+        "data": {
+            "field_name": field_name,
+            "project_field_type": ProjectCustomFieldTypes.ENUM,
+            "issue_field_type": IssueCustomFieldTypes.SINGLE_ENUM,
+            "bundle_element_type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT,
+        },
+    }
+
+
+def _discovered_field_with_values(values: list[dict]):
+    """A discovery result whose field carries the bundle discovery reported.
+
+    The ids are in the bundle, so the payload builder can address a value by id without
+    another round-trip -- which is what makes an id-addressed write cost no extra
+    request.
+    """
+
+    def discover(project_id: str, field_name: str) -> dict:
+        result = _discovered_field(project_id, field_name)
+        result["data"]["field_details"] = {"bundle": {"values": values}}
+        return result
+
+    return discover
+
+
 class TestIssueServiceCreation:
     """Test issue creation functionality."""
 
@@ -155,13 +199,27 @@ class TestIssueServiceCreation:
 
     @pytest.mark.asyncio
     async def test_create_issue_with_all_fields(self, issue_service, mock_response):
-        """Test issue creation with all optional fields."""
+        """Test issue creation with all optional fields.
+
+        Priority and Type are built from the field's own discovered type, not from a
+        hard-coded guess: the payload below is what an enum field produces, because
+        that is the field this project has.
+        """
         with (
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
             patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
         ):
             mock_request.return_value = mock_response
             mock_handle.return_value = {"status": "success"}
+            mock_discover.return_value = {
+                "status": "success",
+                "data": {
+                    "project_field_type": ProjectCustomFieldTypes.ENUM,
+                    "issue_field_type": IssueCustomFieldTypes.SINGLE_ENUM,
+                    "bundle_element_type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT,
+                },
+            }
 
             result = await issue_service.create_issue(
                 project_id="project-1",
@@ -197,6 +255,148 @@ class TestIssueServiceCreation:
 
             mock_request.assert_called_once_with("POST", "issues", json_data=expected_data)
             assert result["status"] == "success"
+            # The payload's shape came from the field's own type, not from a constant.
+            assert {call.args[1] for call in mock_discover.call_args_list} == {"Priority", "Type"}
+
+    @pytest.mark.asyncio
+    async def test_the_whole_create_path_with_an_id(self, issue_service, mock_response):
+        """A value id goes on the wire as the id -- asserted on the request body.
+
+        This is the test that kills the half-fix. A validator widened to accept ids,
+        with the payload builder left alone, would pass every check that looks at the
+        verdict and still send `{"name": "157-2"}` -- which the server refuses with a
+        message about a name that does not exist. The body is the only place the two
+        halves meet, so it is the only place the claim can be tested.
+        """
+        priority_values = [{"id": "157-1", "name": "Critical"}, {"id": "157-2", "name": "Major"}]
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.side_effect = _discovered_field_with_values(priority_values)
+
+            result = await issue_service.create_issue(
+                project_id="project-1",
+                summary="Test Summary",
+                custom_fields={"Priority": ["157-2"]},
+            )
+
+            assert result["status"] == "success"
+            body = mock_request.call_args.kwargs["json_data"]
+            assert body["customFields"] == [
+                {
+                    "$type": IssueCustomFieldTypes.SINGLE_ENUM,
+                    "name": "Priority",
+                    "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+                }
+            ]
+
+    @pytest.mark.asyncio
+    async def test_a_create_by_id_and_by_name_differ_only_in_the_key(self, issue_service, mock_response):
+        """One grammar: the same field, the same type, whichever form the value takes."""
+        priority_values = [{"id": "157-1", "name": "Critical"}, {"id": "157-2", "name": "Major"}]
+
+        bodies = []
+        for value in ("157-2", "Major"):
+            with (
+                patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+                patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+                patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+            ):
+                mock_request.return_value = mock_response
+                mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+                mock_discover.side_effect = _discovered_field_with_values(priority_values)
+
+                await issue_service.create_issue(
+                    project_id="project-1", summary="Test Summary", custom_fields={"Priority": [value]}
+                )
+                bodies.append(mock_request.call_args.kwargs["json_data"]["customFields"][0])
+
+        assert bodies[0]["name"] == bodies[1]["name"] == "Priority"
+        assert bodies[0]["$type"] == bodies[1]["$type"]
+        assert bodies[0]["value"]["$type"] == bodies[1]["value"]["$type"]
+        assert bodies[0]["value"] == {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"}
+        assert bodies[1]["value"] == {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "Major"}
+
+    @pytest.mark.asyncio
+    async def test_a_priority_by_id_produces_the_priority_payload(self, issue_service, mock_response):
+        """`--priority` is the same write as `-cf "Priority=..."`, so an id works there too."""
+        priority_values = [{"id": "157-1", "name": "Critical"}, {"id": "157-2", "name": "Major"}]
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.side_effect = _discovered_field_with_values(priority_values)
+
+            await issue_service.update_issue("TEST-1", priority="157-2")
+
+            body = mock_request.call_args.kwargs["json_data"]
+            assert body["customFields"] == [
+                {
+                    "$type": IssueCustomFieldTypes.SINGLE_ENUM,
+                    "name": "Priority",
+                    "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+                }
+            ]
+
+    @pytest.mark.asyncio
+    async def test_a_state_by_id_produces_the_state_payload(self, issue_service, mock_response):
+        """`--state` writes the state field, addressed by id, with the state field's type."""
+        state_values = [{"id": "159-2", "name": "In Progress"}]
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_state_field", new_callable=AsyncMock) as mock_state,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_state.return_value = {"status": "success", "data": {"field_name": "State"}}
+            mock_discover.side_effect = _discovered_field_with_values(state_values)
+
+            await issue_service.update_issue("TEST-1", state="159-2")
+
+            body = mock_request.call_args.kwargs["json_data"]
+            assert body["customFields"] == [
+                {
+                    "$type": IssueCustomFieldTypes.STATE,
+                    "name": "State",
+                    "value": {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "id": "159-2"},
+                }
+            ]
+
+    @pytest.mark.asyncio
+    async def test_a_value_of_another_fields_bundle_creates_no_issue(self, issue_service, mock_response):
+        """A refused value leaves the issue uncreated rather than half-written."""
+        priority_values = [{"id": "157-1", "name": "Critical"}]
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.side_effect = _discovered_field_with_values(priority_values)
+
+            result = await issue_service.create_issue(
+                project_id="project-1",
+                summary="Test Summary",
+                custom_fields={"Priority": ["159-2"]},
+            )
+
+            assert result["status"] == "error"
+            assert "not a valid Priority" in result["message"]
+            mock_request.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_issue_value_error(self, issue_service):
@@ -362,17 +562,24 @@ class TestIssueServiceUpdate:
 
     @pytest.mark.asyncio
     async def test_update_issue_with_custom_fields(self, issue_service, mock_response):
-        """Test issue update with state and priority."""
+        """Test issue update with state and priority.
+
+        The state's payload carries the state field's own issue-side type --
+        `StateIssueCustomField` -- and not the `SingleEnumIssueCustomField` this path
+        used to hard-code, which is what a state field is not.
+        """
         with (
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
             patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
             patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
-            patch.object(issue_service, "_discover_state_field_for_project", new_callable=AsyncMock) as mock_discover,
+            patch.object(ProjectService, "discover_state_field", new_callable=AsyncMock) as mock_state,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
         ):
             mock_request.return_value = mock_response
             mock_handle.return_value = {"status": "success"}
             mock_get_project.return_value = "TEST"
-            mock_discover.return_value = {"field_name": "State", "bundle_type": "EnumBundleElement"}
+            mock_state.return_value = {"status": "success", "data": {"field_name": "State"}}
+            mock_discover.side_effect = _discovered_field
 
             await issue_service.update_issue("TEST-1", summary="Updated Summary", state="In Progress", priority="High")
 
@@ -381,14 +588,14 @@ class TestIssueServiceUpdate:
                 "summary": "Updated Summary",
                 "customFields": [
                     {
-                        "$type": "SingleEnumIssueCustomField",
+                        "$type": IssueCustomFieldTypes.STATE,
                         "name": "State",
-                        "value": {"$type": "EnumBundleElement", "name": "In Progress"},
+                        "value": {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "name": "In Progress"},
                     },
                     {
-                        "$type": "SingleEnumIssueCustomField",
+                        "$type": IssueCustomFieldTypes.SINGLE_ENUM,
                         "name": "Priority",
-                        "value": {"$type": "EnumBundleElement", "name": "High"},
+                        "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "High"},
                     },
                 ],
             }
@@ -811,9 +1018,13 @@ class TestIssueServiceUpdate:
         with (
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
             patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
         ):
             mock_request.return_value = mock_response
             mock_handle.return_value = {"status": "success"}
+            mock_get_project.return_value = "TEST"
+            mock_discover.side_effect = _discovered_field
 
             result = await issue_service.update_issue(
                 "TEST-1", summary="Updated Summary", assignee="admin", priority="High"
@@ -971,13 +1182,15 @@ class TestIssueServiceMove:
 
         with (
             patch.object(issue_service, "_get_project_id_from_issue", new_callable=AsyncMock) as mock_get_project,
-            patch.object(issue_service, "_discover_state_field_for_project", new_callable=AsyncMock) as mock_discover,
+            patch.object(ProjectService, "discover_state_field", new_callable=AsyncMock) as mock_state,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
             patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
         ):
             # Mock dynamic field discovery
             mock_get_project.return_value = "TEST"
-            mock_discover.return_value = {"field_name": "State", "bundle_type": "StateBundleElement"}
+            mock_state.return_value = {"status": "success", "data": {"field_name": "State"}}
+            mock_discover.side_effect = _discovered_field
 
             # Mock API response
             mock_request.return_value = update_response
@@ -987,7 +1200,7 @@ class TestIssueServiceMove:
 
             # Verify field discovery was called
             mock_get_project.assert_called_once_with("TEST-1")
-            mock_discover.assert_called_once_with("TEST")
+            mock_state.assert_called_once_with("TEST")
 
             # Verify update request
             mock_request.assert_called_once()
@@ -997,8 +1210,8 @@ class TestIssueServiceMove:
             assert update_data["$type"] == "Issue"
             assert len(update_data["customFields"]) == 1
             assert update_data["customFields"][0]["name"] == "State"
-            assert update_data["customFields"][0]["$type"] == "SingleEnumIssueCustomField"
-            assert update_data["customFields"][0]["value"]["$type"] == "StateBundleElement"
+            assert update_data["customFields"][0]["$type"] == IssueCustomFieldTypes.STATE
+            assert update_data["customFields"][0]["value"]["$type"] == CustomFieldValueTypes.STATE_BUNDLE_ELEMENT
             assert update_data["customFields"][0]["value"]["name"] == "In Progress"
 
             assert result["status"] == "success"
