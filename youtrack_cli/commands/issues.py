@@ -14,7 +14,7 @@ import click
 
 from ..auth import AuthManager
 from ..cli_utils import AliasedGroup, validate_issue_id_format, validate_project_id_format
-from ..console import get_console, print_status
+from ..console import get_console, get_error_console, print_status
 from ..field_selection import find_missing_fields
 
 
@@ -311,7 +311,7 @@ def _reject_dropped_fields(expression: str | None, records, output_format: str) 
     raise click.ClickException(f"requested field(s) the API does not return: {', '.join(missing)}")
 
 
-def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> bool:
+def _apply_tags(console, error_console, issue_manager, issue_id: str, tags: tuple) -> bool:
     """Apply each tag to an already-created issue. Returns False if any was not applied.
 
     Tags live on a separate resource, so this cannot be folded into the create payload — the API
@@ -323,6 +323,9 @@ def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> bool:
     The caller exits non-zero when this returns False. A create that dropped a tag is a *partial*
     success, and a script reading only the exit code would otherwise be told everything worked.
     The message names the issue precisely so the tag can be retried without re-creating it.
+
+    A tag that was applied is reported on stdout (it happened); a tag that was not applied is
+    reported on stderr (it went wrong).
     """
     import asyncio
 
@@ -333,7 +336,7 @@ def _apply_tags(console, issue_manager, issue_id: str, tags: tuple) -> bool:
             console.print(f"[green]Tagged:[/green] {tag_name}")
         else:
             applied = False
-            console.print(
+            error_console.print(
                 f"⚠️  Issue {issue_id} was created but the tag '{tag_name}' was not applied: "
                 f"{result['message']}. The issue exists — retry the tag, do not re-create it.",
                 style="yellow",
@@ -462,6 +465,10 @@ def create(
     from ..utils import display_error, display_success, handle_error
 
     console = get_console()
+    # stdout says what happened; stderr says what went wrong. The failure detail of
+    # this command belongs on stderr, so a caller reading stdout is never handed a
+    # failure as if it were a result.
+    error_console = get_error_console()
     auth_manager = AuthManager(ctx.obj.get("config"))
     issue_manager = IssueManager(auth_manager)
 
@@ -471,10 +478,10 @@ def create(
         try:
             custom_fields = _parse_custom_fields(custom_field)
         except click.BadParameter as e:
-            console.print(f"❌ {e.message}", style="red")
+            error_console.print(f"❌ {e.message}", style="red")
             raise
 
-    console.print(f"🐛 Creating issue '{summary}' in project '{project_id}'...", style="blue")
+    print_status(f"🐛 Creating issue '{summary}' in project '{project_id}'...")
 
     try:
         result = asyncio.run(
@@ -490,7 +497,6 @@ def create(
         )
 
         if result["status"] == "success":
-            display_success(f"{result['message']}")
             issue = result["data"]
             # Display friendly ID if available, otherwise fall back to internal ID.
             #
@@ -500,8 +506,7 @@ def create(
             # therefore always missed, and the line fell through to the internal id even though
             # the success message above it said `PROJ-361`. Guarding on `friendly_id` first fixes
             # the contradiction; the `idReadable` read stays for any caller that does populate it.
-            issue_id = issue.get("idReadable") or result.get("friendly_id") or issue.get("id", "N/A")
-            console.print(f"[blue]Issue ID:[/blue] {issue_id}")
+            issue_id = issue.get("idReadable") or result.get("friendly_id") or issue.get("id") or "N/A"
 
             # Tags are a separate resource, so they are applied after the create. They are
             # intentionally *not* folded into the create payload: the API wants `{"id": …}`
@@ -509,12 +514,27 @@ def create(
             # rather than silently dropped, which is the behaviour worth keeping. A failure
             # here is reported with the issue id, because the issue exists — saying only
             # "failed" would leave the caller unsure whether anything was created.
-            if tag and issue_id != "N/A":
-                if not _apply_tags(console, issue_manager, issue_id, tag):
+            if tag:
+                if issue_id == "N/A":
+                    # The issue exists, but nothing can be applied to it: a tag needs an id
+                    # and there is none. Skipping it silently would report a full success
+                    # for a create that dropped what it was asked to do.
+                    error_console.print(
+                        f"⚠️  The issue was created, but its id could not be resolved, so the tag(s) "
+                        f"{', '.join(tag)} were not applied. The issue exists — look it up by its "
+                        f"summary ('{summary}') and retry the tag; do not re-create it.",
+                        style="yellow",
+                    )
+                    raise click.ClickException("Issue created, but the tag(s) could not be applied")
+                if not _apply_tags(console, error_console, issue_manager, issue_id, tag):
                     # Exit non-zero: the issue was created, but the command did not do all of
                     # what it was asked to. A caller reading only the exit code must not be told
-                    # this succeeded.
+                    # this succeeded — and neither must one reading only stdout, which is why
+                    # the success marker below is printed only once the tags are on.
                     raise click.ClickException("Issue created, but one or more tags were not applied")
+
+            display_success(f"{result['message']}")
+            print_status(f"Issue ID: {issue_id}")
 
         else:
             # Create enhanced error for common API failures
@@ -525,9 +545,9 @@ def create(
                     "Use 'yt projects list' to see available projects."
                 )
                 error_result = handle_error(error, "create issue")
-                display_error(error_result)
+                display_error(error_result, error_console)
             else:
-                console.print(f"❌ {result['message']}", style="red")
+                error_console.print(f"❌ {result['message']}", style="red")
 
             raise click.ClickException("Failed to create issue")
 
@@ -536,7 +556,7 @@ def create(
     except Exception as e:
         # Provide helpful guidance for common errors
         error_result = handle_error(e, "create issue")
-        display_error(error_result)
+        display_error(error_result, error_console)
 
         # Add usage guidance for common mistakes
         usage_error = UsageError(
@@ -555,7 +575,7 @@ def create(
             ],
         )
         usage_result = handle_error(usage_error, "issue creation guidance")
-        display_error(usage_result)
+        display_error(usage_result, error_console)
 
         raise click.ClickException("Failed to create issue") from e
 

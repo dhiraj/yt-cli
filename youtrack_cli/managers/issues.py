@@ -26,6 +26,23 @@ __all__ = ["IssueManager"]
 logger = get_logger(__name__)
 
 
+def _custom_field_name(field: dict[str, Any]) -> str:
+    """The name of a project custom field, from wherever the API put it.
+
+    The admin endpoint answers with the name nested under ``field.name`` and no
+    top-level ``name`` at all; other shapes answer with a flat ``name``. The nested
+    one is read first because it is the one the API actually sends, and the flat one
+    is kept as the fallback for the shapes that do send it.
+    """
+    nested = field.get("field")
+    if isinstance(nested, dict):
+        name = nested.get("name")
+        if name:
+            return str(name)
+    name = field.get("name")
+    return str(name) if name else ""
+
+
 class IssueManager:
     """Manages YouTrack issues business logic and presentation.
 
@@ -503,6 +520,20 @@ class IssueManager:
             logger.error(f"Error resolving project ID '{project_id_or_short_name}': {e}")
             return None
 
+    def _find_custom_field_by_name(self, custom_fields: list[dict[str, Any]], field_name: str) -> dict[str, Any] | None:
+        """Locate a project custom field by the name the caller asked for.
+
+        The vocabulary that gets checked has to be the caller's field and not a guess
+        at one. A project whose enum is called ``Severity`` would otherwise have its
+        ``--priority`` value checked against the wrong bundle, and a legal value
+        refused.
+        """
+        wanted = field_name.strip().lower()
+        for field in custom_fields:
+            if _custom_field_name(field).strip().lower() == wanted:
+                return field
+        return None
+
     async def _validate_custom_field_value(self, project_id: str, field_name: str, value: str) -> dict[str, Any]:
         """Validate that a custom field value exists for the project.
 
@@ -512,7 +543,10 @@ class IssueManager:
             value: Value to validate
 
         Returns:
-            Dictionary with 'valid' boolean and 'message' string
+            Dictionary with 'valid' boolean and 'message' string, plus 'field_id'
+            (the id of the field whose vocabulary was checked, when one was found)
+            and 'guessed' (True when the field was not located by name, so whatever
+            was checked was a heuristic guess rather than the caller's field)
         """
         try:
             # Get project custom fields to find the field
@@ -523,26 +557,31 @@ class IssueManager:
             if fields_result["status"] != "success":
                 # If we can't get custom fields, allow the value (fail open)
                 logger.warning(f"Could not validate custom field '{field_name}' - allowing value '{value}'")
-                return {"valid": True, "message": ""}
+                return {"valid": True, "message": "", "field_id": None, "guessed": False}
 
             custom_fields = fields_result["data"]
             if not isinstance(custom_fields, list):
-                return {"valid": True, "message": ""}
+                return {"valid": True, "message": "", "field_id": None, "guessed": False}
 
-            # Find the specified field by name if available
-            target_field = None
-            for field in custom_fields:
-                if field.get("name") == field_name:
-                    target_field = field
-                    break
-
-            # If field name matching failed (names might be None), try heuristic matching
-            if not target_field:
+            # Find the field the caller named. Its name is nested under `field.name`
+            # in what the API returns, so a lookup on the flat name finds nothing and
+            # every check ends up run against a guess.
+            target_field = self._find_custom_field_by_name(custom_fields, field_name)
+            guessed = target_field is None
+            if guessed:
+                # Last resort, and the vocabulary checked below is then a guess at the
+                # caller's field rather than the field itself -- so say so, because a
+                # guess is not a fact.
+                logger.warning(
+                    f"Custom field '{field_name}' was not found by name - the field it was checked against is a guess"
+                )
                 target_field = await self._find_field_by_heuristics(custom_fields, field_name, value)
+
+            field_id = target_field.get("id") if target_field else None
 
             if not target_field:
                 # Field doesn't exist in project, provide helpful message
-                available_fields = [f.get("name", "") for f in custom_fields if f.get("name")]
+                available_fields = [name for name in map(_custom_field_name, custom_fields) if name]
                 if not available_fields:
                     # If no field names are available due to API limitations,
                     # fail closed for critical fields like Type and Priority to prevent
@@ -554,15 +593,19 @@ class IssueManager:
                             "message": f"Cannot validate '{field_name}' field - field information not available from project API. "
                             + "This field may not exist in the project configuration. "
                             + "Please verify the field exists or remove it from your data.",
+                            "field_id": None,
+                            "guessed": True,
                         }
                     # For other fields, log warning but fail open (backwards compatibility)
                     logger.warning(
                         f"Field names not available from project API - allowing '{field_name}' with value '{value}'"
                     )
-                    return {"valid": True, "message": ""}
+                    return {"valid": True, "message": "", "field_id": None, "guessed": True}
                 return {
                     "valid": False,
                     "message": f"Field '{field_name}' is not available in this project. Available fields: {', '.join(available_fields)}",
+                    "field_id": None,
+                    "guessed": True,
                 }
 
             # Get valid values for the field
@@ -571,7 +614,7 @@ class IssueManager:
 
             if not valid_values:
                 # If no bundle values, allow any value (might be a text field)
-                return {"valid": True, "message": ""}
+                return {"valid": True, "message": "", "field_id": field_id, "guessed": guessed}
 
             # Check if the provided value is in the valid values
             valid_value_names = [v.get("name", "") for v in valid_values if isinstance(v, dict)]
@@ -580,14 +623,16 @@ class IssueManager:
                 return {
                     "valid": False,
                     "message": f"'{value}' is not a valid {field_name}. Valid values: {', '.join(valid_value_names)}",
+                    "field_id": field_id,
+                    "guessed": guessed,
                 }
 
-            return {"valid": True, "message": ""}
+            return {"valid": True, "message": "", "field_id": field_id, "guessed": guessed}
 
         except Exception as e:
             logger.error(f"Error validating custom field '{field_name}' value '{value}': {e}")
             # Fail open - allow the value if validation fails
-            return {"valid": True, "message": ""}
+            return {"valid": True, "message": "", "field_id": None, "guessed": False}
 
     async def _find_field_by_heuristics(
         self, custom_fields: list, field_name: str, value: str
@@ -595,7 +640,8 @@ class IssueManager:
         """Find a custom field using heuristics when field names are not available.
 
         This method attempts to identify fields by examining their bundle values and types.
-        It's used as a fallback when the YouTrack API doesn't return field names.
+        It's used as a fallback when the YouTrack API doesn't return field names -- and it is
+        a *guess* at the field, not the field, so the caller says so when it is used.
         """
         if field_name == "Priority":
             # Look for fields that contain typical priority values
