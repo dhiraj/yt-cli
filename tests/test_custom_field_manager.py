@@ -863,10 +863,10 @@ class TestBundleValuesByNameOrId:
     ]
 
     @staticmethod
-    def _info(issue_type, values, element_type=CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT):
+    def _info(issue_type, values, element_type=CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, project_type=None):
         """A discovered field, with the bundle discovery reported."""
         return {
-            "project_field_type": ProjectCustomFieldTypes.ENUM,
+            "project_field_type": project_type or ProjectCustomFieldTypes.ENUM,
             "issue_field_type": issue_type,
             "bundle_element_type": element_type,
             "field_details": {"bundle": {"values": values}},
@@ -911,6 +911,57 @@ class TestBundleValuesByNameOrId:
         assert result["value"] == [
             {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": "Critical"},
             {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+        ]
+
+    @pytest.mark.parametrize(
+        ("issue_type", "project_type", "element_type", "field_name", "value_name", "value_id"),
+        [
+            (
+                IssueCustomFieldTypes.MULTI_VERSION,
+                ProjectCustomFieldTypes.VERSION,
+                CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT,
+                "Fix versions",
+                "2026-1",
+                "133-24",
+            ),
+            (
+                IssueCustomFieldTypes.MULTI_BUILD,
+                ProjectCustomFieldTypes.BUILD,
+                CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT,
+                "Fixed in build",
+                "2026.1",
+                "133-25",
+            ),
+            (
+                IssueCustomFieldTypes.MULTI_OWNED,
+                ProjectCustomFieldTypes.OWNED,
+                CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT,
+                "Subsystem",
+                "Backend",
+                "133-26",
+            ),
+        ],
+    )
+    def test_a_multi_valued_field_of_any_kind_takes_a_mix_of_names_and_ids(
+        self, issue_type, project_type, element_type, field_name, value_name, value_id
+    ):
+        """Every multi-valued builder resolves its own list, and each value in it.
+
+        The version, build and owned builders are separate code from the enum one, so
+        the enum mix test says nothing about them. A builder that decided the form
+        once for the whole list -- taking the first value's form for every value --
+        would write the second value in the first value's form, and the value the
+        caller named by id would reach the server as a name that does not exist.
+        """
+        values = [{"id": value_id, "name": value_name}]
+        result = CustomFieldManager.create_field_by_type(
+            self._info(issue_type, values, element_type=element_type, project_type=project_type),
+            field_name,
+            [value_name, value_id],
+        )
+        assert result["value"] == [
+            {"$type": element_type, "name": value_name},
+            {"$type": element_type, "id": value_id},
         ]
 
     def test_a_state_field_by_id(self):

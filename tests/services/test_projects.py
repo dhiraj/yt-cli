@@ -985,6 +985,19 @@ class TestCustomFieldSelectors:
             await project_service.discover_custom_field("TEST", "Sprint")
         return mock_list.call_args.kwargs["fields"]
 
+    @staticmethod
+    async def _selector_used_by_the_bundle_read(project_service):
+        """The selector the *bundle* read sends -- the read that supplies the value ids."""
+        with (
+            patch.object(project_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(project_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+        ):
+            mock_request.return_value = MagicMock(spec=httpx.Response)
+            mock_handle.return_value = {"status": "success", "data": {"id": "180-26"}}
+            await project_service.get_custom_field_details("TEST", "180-26", include_bundle=True)
+        bundle_call = next(call for call in mock_request.call_args_list if call.args[1].endswith("/bundle"))
+        return bundle_call.kwargs["params"]["fields"]
+
     @pytest.mark.asyncio
     async def test_the_detail_read_asks_for_the_field_types_multiplicity(self, project_service):
         selector = await self._selector_used_by_detail_read(project_service)
@@ -996,6 +1009,19 @@ class TestCustomFieldSelectors:
         selector = await self._selector_used_by_discovery(project_service)
         assert "field(fieldType(" in selector
         assert self.MULTIPLICITY in selector
+
+    @pytest.mark.asyncio
+    async def test_the_bundle_read_asks_for_the_value_ids(self, project_service):
+        """The ids are what a value can be addressed by, and this read is where they come from.
+
+        Without `id` in the selector the server answers with the names and nothing else,
+        so every id-addressed write is refused at run time -- with the whole suite
+        green, because every other test mocks this read. A capability that fails
+        silently is worse than one that is absent: the caller sees a legal value
+        refused and concludes the value is wrong.
+        """
+        selector = await self._selector_used_by_the_bundle_read(project_service)
+        assert "values(id" in selector, f"the bundle read must ask for the ids: {selector!r}"
 
     @pytest.mark.asyncio
     async def test_both_selectors_name_the_multiplicity_inside_the_field_type(self, project_service):
