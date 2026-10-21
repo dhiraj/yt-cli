@@ -2982,15 +2982,23 @@ class TestCustomFieldValueAddressing:
 
         Writing it against a field that does not hold it is the mistake this rule
         exists to prevent, so it is refused rather than forwarded to the server.
+
+        The project below holds *two* fields, and the token is the other field's
+        value id: a check that accepted every id the project knows would let it
+        through, and the test would only ever have proved that an id nobody holds
+        is refused.
         """
-        fields = [self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}])]
+        fields = [
+            self._project_field("pri-1", "Priority", [{"name": "Critical", "id": "157-1"}]),
+            self._project_field("sta-1", "State", [{"name": "In Progress", "id": "159-2"}]),
+        ]
         manager.project_service.get_project_custom_fields = AsyncMock(
             return_value={"status": "success", "data": fields}
         )
 
         result = await manager._validate_custom_field_value("0-1", "Priority", "159-2")
 
-        assert result["valid"] is False, "159-2 is a state id, not a priority"
+        assert result["valid"] is False, "159-2 is the State field's value id, not a priority's"
         assert "not a valid Priority" in result["message"]
 
     @pytest.mark.asyncio

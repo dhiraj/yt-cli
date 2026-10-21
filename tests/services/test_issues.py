@@ -295,6 +295,41 @@ class TestIssueServiceCreation:
             ]
 
     @pytest.mark.asyncio
+    async def test_a_create_with_a_priority_by_id_sends_the_id(self, issue_service, mock_response):
+        """`yt issues create --priority <id>` has to carry the id, like every other path.
+
+        The flag path is the create path's own -- it is not the `-cf` path under
+        another spelling -- so the id has to survive it too. The body is asserted
+        rather than the verdict, because the verdict is the resolver's answer and
+        the body is what the server is actually given.
+        """
+        priority_values = [{"id": "157-1", "name": "Critical"}, {"id": "157-2", "name": "Major"}]
+        with (
+            patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
+            patch.object(issue_service, "_handle_response", new_callable=AsyncMock) as mock_handle,
+            patch.object(ProjectService, "discover_custom_field", new_callable=AsyncMock) as mock_discover,
+        ):
+            mock_request.return_value = mock_response
+            mock_handle.return_value = {"status": "success", "data": {"id": "TEST-1"}}
+            mock_discover.side_effect = _discovered_field_with_values(priority_values)
+
+            result = await issue_service.create_issue(
+                project_id="project-1",
+                summary="Test Summary",
+                priority="157-2",
+            )
+
+            assert result["status"] == "success"
+            body = mock_request.call_args.kwargs["json_data"]
+            assert body["customFields"] == [
+                {
+                    "$type": IssueCustomFieldTypes.SINGLE_ENUM,
+                    "name": "Priority",
+                    "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "id": "157-2"},
+                }
+            ]
+
+    @pytest.mark.asyncio
     async def test_a_create_by_id_and_by_name_differ_only_in_the_key(self, issue_service, mock_response):
         """One grammar: the same field, the same type, whichever form the value takes."""
         priority_values = [{"id": "157-1", "name": "Critical"}, {"id": "157-2", "name": "Major"}]
