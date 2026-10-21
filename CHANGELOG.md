@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- 🐛 The fork's own tests no longer depend on the machine they run on. The issue-panel test
+  asserted a rendered local-time wall clock, so it held only on a UTC-4 host and failed on
+  every other one — which is what the fork's CI reported on every Python version. It now
+  round-trips the instant at second precision, which is zone-independent and still rejects any
+  other format, and the panel assertion compares the rendered panel against what the helper
+  produces. The local-time semantics are documented at the fork-only helper that renders them,
+  in `youtrack_cli/panels.py::_format_resolved`
+- 🐛 A console test mutated the theme of the module-level console manager and never restored
+  it, so a later themed render could die with `rich.errors.MissingStyle` — which made the
+  timestamp test itself fail in roughly a quarter of randomised local runs. An autouse fixture
+  now snapshots and restores the theme, so the suite's theme state no longer leaks from one
+  test into the next
+- 🐛 The fork's full `pre-commit run --all-files` gate is green: 25 hooks, 0 failures. It was
+  red on four checks, all inherited from upstream — three pydocstyle violations
+  (`_format_resolved` in `youtrack_cli/panels.py`; `stream_list_issues` and
+  `_discover_state_field_name` in `youtrack_cli/managers/issues.py`, the latter two being
+  upstream's own text) and a shebang check on
+  `.specify/extensions/agent-context/scripts/powershell/update-agent-context.ps1`, which carries
+  a `#!/usr/bin/env pwsh` shebang but was tracked without the executable bit. The docstrings
+  were rewritten to the repo's own Google-style convention — no check disabled and no
+  suppression — and the script is now tracked as executable. Upstream sees none of this: its
+  CI lint job is ruff-only (`tox -e lint`), and the pydocstyle and shebang checks run only
+  inside the full `pre-commit` run
+
+### Changed
+- ℹ️ The test fixtures use generic sample issue ids instead of the private issue-id prefix they
+  carried before, across `tests/test_issues.py`, `tests/test_field_selection.py` and
+  `tests/test_panels.py` — in the assertions, in the docstrings and in the test names alike.
+  Every one of those ids was this fork's own; upstream's tree never carried them. The
+  replacements are one-to-one and no assertion was weakened, skipped or deleted, so the
+  fixtures still mean exactly what they meant. It also lifts a recurring tax on the public
+  tree: the fork's pre-push hook refuses a push whose added lines carry that pattern, so any
+  later edit touching one of those lines was blocked by an error that does not explain itself
+- ℹ️ The last private identifiers are gone from the public tree. A private project short key
+  used as a sample project name — six call sites in `tests/services/test_projects.py`, now the
+  generic `"TEST"` the rest of that file already used — and a bare ticket number — three
+  source comments, three tests and two changelog entries — both survived the earlier cleanup,
+  because neither matched the pre-push hook's patterns. Every ticket-number pointer was
+  replaced by a description of what it pointed at, so each comment still says what the code
+  does and why; the two changelog pointers now read as plain sentences. The tree now scans
+  clean of the private project key, the bare ticket number and the tracker name
+
 ## [0.26.0] - 2026-10-20
 
 ### Added
