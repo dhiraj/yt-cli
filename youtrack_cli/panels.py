@@ -13,7 +13,9 @@ from .utils import format_timestamp
 
 
 def _format_resolved(value: Any) -> str:
-    """Render `Issue.resolved`: `None` while the issue is open, a Unix-ms timestamp once
+    """Render the `Issue.resolved` field for display.
+
+    `Issue.resolved` is `None` while the issue is open and a Unix-ms timestamp once
     it is delivered (verified against a live instance — `resolved: null` on an open issue,
     `resolved: 1790968956470` on the same issue after `--state Verified`).
 
