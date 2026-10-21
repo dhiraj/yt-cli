@@ -2216,11 +2216,12 @@ class TestCreateAppliesTagsAndNamesTheIssue:
         from youtrack_cli.commands.issues import _apply_tags
 
         console = Mock()
+        error_console = Mock()
         manager = Mock()
 
         # Every tag must be dispatched, not just the first — `--tag` is repeatable.
         with patch("asyncio.run", return_value={"status": "success"}):
-            applied = _apply_tags(console, manager, "PROJ-9", ("lane-root", "other"))
+            applied = _apply_tags(console, error_console, manager, "PROJ-9", ("lane-root", "other"))
 
         assert manager.add_tag.call_count == 2
         assert applied is True, "the caller needs this to decide its exit code"
@@ -2231,21 +2232,25 @@ class TestCreateAppliesTagsAndNamesTheIssue:
         from youtrack_cli.commands.issues import _apply_tags
 
         console = Mock()
+        error_console = Mock()
         manager = Mock()
         manager.add_tag = Mock(return_value={"status": "error", "message": "Tag 'nope' not found."})
 
         with patch("asyncio.run", return_value={"status": "error", "message": "Tag 'nope' not found."}):
-            applied = _apply_tags(console, manager, "PROJ-9", ("nope",))
+            applied = _apply_tags(console, error_console, manager, "PROJ-9", ("nope",))
 
         # A dropped tag is a partial success, and the command must exit non-zero for it —
         # automation reading only the exit code would otherwise be told everything worked.
         assert applied is False
 
         # The issue WAS created, so the warning has to say which one — a bare "failed" would
-        # leave the caller unsure whether anything exists.
-        printed = " ".join(str(c) for c in console.print.call_args_list)
+        # leave the caller unsure whether anything exists. It goes to stderr, because it is
+        # what went wrong; stdout says what happened.
+        printed = " ".join(str(c) for c in error_console.print.call_args_list)
         assert "PROJ-9" in printed
         assert "nope" in printed
+        assert error_console.print.call_count == 1
+        assert console.print.call_count == 0, "a tag that was not applied is not a success"
 
 
 class TestIssuesShowJSON:
@@ -2790,3 +2795,286 @@ class TestParseCustomFields:
 
         with pytest.raises(click.BadParameter):
             self._parse((spec,))
+
+
+@pytest.mark.unit
+class TestCustomFieldVocabularyLookup:
+    """Which field the pre-flight vocabulary check is actually run against.
+
+    `yt issues create` validates `--priority` and `--type` against the project's live
+    field vocabulary before it creates anything, and refuses a value that is not in it.
+    That refusal is only as good as the field it was run against.
+
+    The admin endpoint answers with the field's name nested under `field.name` and no
+    top-level `name` at all, so a lookup on the flat name finds nothing and every check
+    falls through to a heuristic that guesses the field from its values. On a project
+    whose enums happen to look the way the heuristic expects, the guess lands on the
+    right field and the verdict is right anyway — which is exactly what makes the bug
+    invisible from the outside.
+    """
+
+    @staticmethod
+    def _project_field(field_id: str, name: str, values: list[str]) -> dict:
+        """A record in the shape the admin endpoint actually returns."""
+        return {
+            "$type": "ProjectCustomField",
+            "id": field_id,
+            "field": {"name": name},
+            "bundle": {"values": [{"name": value} for value in values]},
+        }
+
+    @pytest.fixture
+    def manager(self):
+        from youtrack_cli.managers.issues import IssueManager
+
+        return IssueManager(MagicMock())
+
+    def test_the_field_is_found_under_its_nested_name(self, manager):
+        fields = [
+            self._project_field("sev-1", "Severity", ["Critical", "Major"]),
+            self._project_field("pri-1", "Priority", ["P0", "P1"]),
+        ]
+
+        resolved = manager._find_custom_field_by_name(fields, "Priority")
+
+        assert resolved is not None, "the named field has to be found at all"
+        assert resolved["id"] == "pri-1"
+
+    def test_a_flat_name_is_still_accepted(self, manager):
+        # The nested shape is what the API sends; the flat one is the shape other
+        # responses use, so both are read.
+        fields = [{"id": "pri-1", "name": "Priority", "bundle": {"values": [{"name": "P0"}]}}]
+
+        resolved = manager._find_custom_field_by_name(fields, "Priority")
+
+        assert resolved is not None
+        assert resolved["id"] == "pri-1"
+
+    @pytest.mark.asyncio
+    async def test_the_vocabulary_checked_is_the_field_that_was_named(self, manager):
+        """The check runs against the named field, not against a guess at one.
+
+        The project below has a `Severity` enum whose values look like priorities and a
+        `Priority` enum whose values do not. A heuristic that guesses the field from its
+        values picks `Severity` — and then refuses `P1`, a perfectly legal priority,
+        because `Severity` does not hold it.
+        """
+        fields = [
+            self._project_field("sev-1", "Severity", ["Critical", "Major"]),
+            self._project_field("pri-1", "Priority", ["P0", "P1"]),
+        ]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "P1")
+
+        assert result["valid"] is True, "P1 is a legal priority of this project"
+        assert result["field_id"] == "pri-1", "the vocabulary checked must be the named field's"
+        assert result["guessed"] is False, "a field found by name is not a guess"
+
+    @pytest.mark.asyncio
+    async def test_a_field_that_cannot_be_found_by_name_is_reported_as_a_guess(self, manager):
+        fields = [self._project_field("sev-1", "Severity", ["Critical", "Major"])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        result = await manager._validate_custom_field_value("0-1", "Priority", "Critical")
+
+        assert result["guessed"] is True, "a field found by heuristic is a guess, not a fact"
+        assert result["field_id"] == "sev-1"
+
+    @pytest.mark.asyncio
+    async def test_a_guess_is_said_out_loud(self, manager):
+        """A guess that is not reported is a guess a caller cannot know about.
+
+        The logger is patched rather than captured: the CLI's own `setup_logging`
+        removes the handlers pytest installs, so a captured log is empty by the time
+        the assertion runs.
+        """
+        from youtrack_cli.managers import issues as issues_manager_module
+
+        fields = [self._project_field("sev-1", "Severity", ["Critical", "Major"])]
+        manager.project_service.get_project_custom_fields = AsyncMock(
+            return_value={"status": "success", "data": fields}
+        )
+
+        with patch.object(issues_manager_module, "logger") as mock_logger:
+            await manager._validate_custom_field_value("0-1", "Priority", "Critical")
+
+        warnings = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        assert any("guess" in w.lower() and "Priority" in w for w in warnings), (
+            f"the guess must be logged, and must name the field: {warnings!r}"
+        )
+
+
+@pytest.mark.unit
+class TestIssuesCreateContract:
+    """What `yt issues create` exits with, and which stream each outcome lands on.
+
+    The exit code and the output used to disagree in two ways. A create that dropped a
+    tag printed the success marker *and* exited 1; a create whose tag was skipped
+    outright printed the success marker, exited 0, and left the tag off the issue. A
+    caller reading either the exit code or stdout was told something false.
+
+    The codes are pinned exactly rather than as "not zero": a change from 1 to 2 is a
+    change of contract, and a test that only says "not zero" would not notice it.
+    """
+
+    @staticmethod
+    def _runner():
+        # Click < 8.2 mixes stderr into stdout unless ``mix_stderr=False``; Click >= 8.2
+        # removed the argument and always separates the two.
+        try:
+            return CliRunner(mix_stderr=False)
+        except TypeError:
+            return CliRunner()
+
+    def _invoke(self, args, results=(), global_args=()):
+        """Run `yt issues create` with the network mocked at ``asyncio.run``.
+
+        ``results`` is what the create hands back, in order: the create, then one per
+        tag that gets applied. An exception in the list is raised instead of returned.
+        ``global_args`` are the options that come before the subcommand.
+        """
+        from youtrack_cli.main import main
+
+        queued = list(results)
+
+        def _run(coro):
+            # The real `asyncio.run` drives the coroutine; this stands in for it, so
+            # the coroutine is closed rather than left dangling for the collector.
+            coro.close()
+            outcome = queued.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with patch("youtrack_cli.main.asyncio.run") as mock_run:
+            mock_run.side_effect = _run
+            result = self._runner().invoke(main, [*global_args, "issues", "create", *args])
+        return result, mock_run
+
+    @staticmethod
+    def _created(issue_id="PROJ-9"):
+        return {
+            "status": "success",
+            "message": f"Issue {issue_id} created successfully",
+            "data": {"id": "3-9"},
+            "friendly_id": issue_id,
+        }
+
+    # --- the outcomes that are a success -------------------------------------
+
+    def test_a_created_issue_exits_zero_and_says_so_on_stdout(self):
+        result, _ = self._invoke(["PROJ", "A summary"], [self._created()])
+
+        assert result.exit_code == 0
+        assert "Success:" in result.stdout
+        assert "PROJ-9" in result.stdout
+
+    def test_quiet_mode_silences_the_progress_line(self):
+        """`--quiet` is the flag scripted callers are told to add globally.
+
+        It did nothing for this command, because the command printed its progress
+        straight to the console instead of going through `print_status` — which is
+        where quiet mode is consulted.
+        """
+        result, _ = self._invoke(["PROJ", "A summary"], [self._created()], global_args=["--quiet"])
+
+        assert result.exit_code == 0
+        assert "Creating issue" not in result.stdout
+        # The answer stays: quiet mode is for the chatter, not for the result.
+        assert "Success:" in result.stdout
+
+    # --- the outcomes that are an application failure: exit 1 -----------------
+
+    def test_a_refused_value_exits_one_with_the_reason_on_stderr(self):
+        result, _ = self._invoke(
+            ["PROJ", "A summary", "--priority", "Critical"],
+            [{"status": "error", "message": "Validation failed: 'Critical' is not a valid Priority"}],
+        )
+
+        assert result.exit_code == 1
+        # The reason belongs on stderr. A caller reading stdout must never be handed
+        # a failure dressed up as a result.
+        assert "not a valid Priority" not in result.stdout
+        assert "not a valid Priority" in result.stderr
+
+    def test_a_rejected_request_exits_one_with_the_reason_on_stderr(self):
+        result, _ = self._invoke(
+            ["PROJ", "A summary"],
+            [{"status": "error", "message": "Request failed with status 400"}],
+        )
+
+        assert result.exit_code == 1
+        assert "status 400" not in result.stdout
+        assert "status 400" in result.stderr
+
+    def test_an_unknown_project_exits_one_with_the_reason_on_stderr(self):
+        result, _ = self._invoke(
+            ["NOPE", "A summary"],
+            [{"status": "error", "message": "Project 'NOPE' not found. Check the short name."}],
+        )
+
+        assert result.exit_code == 1
+        assert "not found" not in result.stdout
+        assert "not found" in result.stderr
+
+    def test_an_unexpected_exception_exits_one_with_the_reason_on_stderr(self):
+        result, _ = self._invoke(["PROJ", "A summary"], [RuntimeError("boom")])
+
+        assert result.exit_code == 1
+        assert "unexpected error" not in result.stdout.lower()
+        assert "unexpected error" in result.stderr.lower()
+
+    def test_a_dropped_tag_exits_one_without_the_success_marker(self):
+        result, _ = self._invoke(
+            ["PROJ", "A summary", "--tag", "nope"],
+            [self._created(), {"status": "error", "message": "Tag 'nope' not found."}],
+        )
+
+        assert result.exit_code == 1
+        # The exit code and the output must agree: no success marker on a path that
+        # does not exit zero.
+        assert "Success:" not in result.stdout
+        # The issue exists, so the failure has to name it — a bare "failed" would
+        # leave the caller unsure whether anything was created.
+        assert "PROJ-9" in result.stderr
+        assert "nope" in result.stderr
+
+    def test_a_tag_that_cannot_be_applied_because_the_issue_has_no_id_still_fails(self):
+        """A tag that was asked for and never applied is a partial success, not a success.
+
+        The create answered without an id, so there is nothing to tag. Skipping the
+        tag silently reported a full success for a create that dropped what it was
+        asked to do.
+        """
+        result, mock_run = self._invoke(
+            ["PROJ", "A summary", "--tag", "nope"],
+            [{"status": "success", "message": "Issue created successfully", "data": {}}],
+        )
+
+        assert result.exit_code == 1
+        assert "Success:" not in result.stdout
+        assert "nope" in result.stderr
+        # Nothing was tagged, and nothing could be: the tag was never even attempted.
+        assert mock_run.call_count == 1, "the tag must not be applied to an unnamed issue"
+
+    # --- the outcomes that are a usage error: exit 2 --------------------------
+
+    def test_a_malformed_custom_field_is_a_usage_error(self):
+        result, _ = self._invoke(["PROJ", "A summary", "-cf", "novalue"])
+
+        assert result.exit_code == 2
+
+    def test_an_invalid_project_id_is_a_usage_error(self):
+        result, _ = self._invoke(["lower", "A summary"])
+
+        assert result.exit_code == 2
+
+    def test_an_unknown_option_is_a_usage_error(self):
+        result, _ = self._invoke(["PROJ", "A summary", "--nope"])
+
+        assert result.exit_code == 2

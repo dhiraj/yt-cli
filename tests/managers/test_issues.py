@@ -1088,9 +1088,14 @@ class TestIssueManagerCustomFieldValidation:
 
                 assert result["valid"] is True
                 assert result["message"] == ""
-                mock_logger.warning.assert_called_once_with(
-                    "Field names not available from project API - allowing 'CustomField' with value 'Value'"
-                )
+                warnings = [call.args[0] for call in mock_logger.warning.call_args_list]
+                assert (
+                    "Field names not available from project API - allowing 'CustomField' with value 'Value'" in warnings
+                ), f"the fail-open warning must be logged: {warnings!r}"
+                # The field could not be found by name either, so the vocabulary that
+                # was not checked is a guess rather than a fact -- and that is said
+                # out loud rather than left for the reader to work out.
+                assert any("guess" in w for w in warnings), f"the guess must be logged: {warnings!r}"
 
     @pytest.mark.asyncio
     async def test_validate_custom_field_value_api_failure(self, issue_manager):

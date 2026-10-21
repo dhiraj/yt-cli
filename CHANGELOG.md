@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- 🐛 The pre-flight check on `--priority` and `--type` now runs against the field the caller
+  named, instead of against a guess at one. The project API answers with a field's name nested
+  under `field.name` and with no top-level `name` at all, so a lookup on the flat name found
+  nothing and every check fell through to a heuristic that guesses the field from the values it
+  holds. The guess happened to land on the right field on the project it was written against,
+  which is what kept the defect invisible: the verdict was right and the field was still a
+  guess. On a project whose `Severity` enum holds `{Low, Normal}`, `--priority Critical` was
+  checked against `Severity` and refused, because `Severity` does not hold `Critical`. The name
+  is now read from `field.name`, with the flat `name` kept as the fallback for the shapes that
+  send it, and the heuristic is only reached when no name matches — and it says so when it is
+  used, because a guess is not a fact. The field the vocabulary was checked against is now
+  reported, so a caller can see which field was consulted
+- 🐛 `yt issues create` no longer reports a partial success as a full one. A create that
+  dropped a tag printed `Success: Issue <id> created successfully` and exited 1, so the exit
+  code and the output disagreed; the success marker is now printed only on a path that exits
+  0. A tag that was asked for and never applied — because the created issue could not be
+  named, so there was nothing to tag — was skipped silently: no tag applied, no warning, exit
+  0, and a success marker on stdout. That is now a failure that says why on stderr. The
+  created issue is not deleted: it exists, and the tag can be retried without creating a
+  second issue. Every exit code of the command is now pinned by a test — 1 for an application
+  failure, 2 for a usage error, 0 for a success — so a later refactor that changes one is
+  caught rather than discovered by a script
 - 🐛 The audit journal no longer destroys the history it exists to keep. The journal is a JSONL
   file capped at 1000 entries and written on every command, so its whole value is its history —
   but its own recovery was what lost it. The read parsed the file inside a single `try`, so one
@@ -58,6 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the full `pre-commit` run
 
 ### Changed
+- ℹ️ `yt issues create` now says what happened on stdout and what went wrong on stderr. The
+  failure detail was printed to stdout while stderr carried only a generic
+  `Error: Failed to create issue` — the inverse of the contract the rest of the CLI works
+  to, and a caller piping stdout was handed a failure as if it were a result. It also left
+  `--quiet` a no-op for this command: quiet mode is consulted only inside `print_status`,
+  and this command never went through it, so the flag scripted callers are told to add
+  globally silenced nothing here. The progress line is now a status message — `--quiet`
+  silences it — and the failure detail goes to stderr. The success line stays on stdout: it
+  is the answer, not chatter
 - ℹ️ `AuditLogger` takes an optional `audit_file` argument, so a caller that wants the journal
   somewhere other than the per-user default can say so instead of reaching into the private
   `_audit_file` attribute
