@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- 🐛 The audit journal no longer destroys the history it exists to keep. The journal is a JSONL
+  file capped at 1000 entries and written on every command, so its whole value is its history —
+  but its own recovery was what lost it. The read parsed the file inside a single `try`, so one
+  malformed line abandoned the rest of the file, and the repair then rewrote the journal from
+  that truncated read: a torn line near the head of a 1000-entry journal left **one** entry
+  behind. The write was a read-modify-write through `open(path, "w")` — truncate, no lock, no
+  atomicity — so two concurrent `yt` processes tore each other's lines. Measured on one machine:
+  71 read failures over 23 days, a 1000-entry journal collapsing to 33 entries under a
+  three-writer race, and readers seeing anywhere from 0 to 182 entries of it. Now a malformed
+  line is skipped and counted rather than fatal, the new journal is written to a temporary file
+  in the same directory, flushed, fsynced and renamed onto the journal — so a reader sees either
+  the complete old journal or the complete new one, and a failed publish leaves the previous
+  journal byte-identical — and writers are serialised by an exclusive `flock` on a separate
+  `audit.log.lock` file, because the rename retires the journal's own inode and a lock held on
+  it would be held on a file that is no longer the journal. A journal that cannot be locked,
+  read or written no longer breaks the command: the degradation is reported at `WARNING` with
+  its reason, once per read, instead of an `ERROR` on stderr for every command that touched a
+  damaged journal
+- 🐛 `yt security clear-audit` clears the journal under the same writer lock and publishes the
+  empty journal atomically, instead of truncating the file in place — which reintroduced
+  exactly the tear it is meant to clear
+- 🐛 The test suite no longer follows `XDG_DATA_HOME` into the developer's real audit journal.
+  The environment fixture cleared the `YOUTRACK_*` variables but not this one, so on a machine
+  that sets it a test's `AuditLogger()` wrote to the real journal rather than to the throwaway
+  home directory
 - 🐛 The fork's own tests no longer depend on the machine they run on. The issue-panel test
   asserted a rendered local-time wall clock, so it held only on a UTC-4 host and failed on
   every other one — which is what the fork's CI reported on every Python version. It now
@@ -33,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the full `pre-commit` run
 
 ### Changed
+- ℹ️ `AuditLogger` takes an optional `audit_file` argument, so a caller that wants the journal
+  somewhere other than the per-user default can say so instead of reaching into the private
+  `_audit_file` attribute
+- ℹ️ `yt audit` and `yt security audit` now say how many malformed lines the journal they are
+  showing had to skip. The count goes to stderr for `--format json`, so it never lands in the
+  payload and the documented `jq '.[]'` shape of that output is unchanged
 - ℹ️ The test fixtures use generic sample issue ids instead of the private issue-id prefix they
   carried before, across `tests/test_issues.py`, `tests/test_field_selection.py` and
   `tests/test_panels.py` — in the assertions, in the docstrings and in the test names alike.

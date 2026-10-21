@@ -14,7 +14,7 @@ from .auth import AuthManager
 from .cli_utils import AliasedGroup
 from .commands import articles, boards, issues, projects, time, tutorial, users
 from .config import ConfigManager
-from .console import get_console, get_error_console, set_quiet_mode
+from .console import get_console, get_error_console, print_status, set_quiet_mode
 from .error_formatting import CommonErrors, format_and_print_error
 from .help_system import check_help_verbose
 from .logging import setup_logging
@@ -417,7 +417,17 @@ def audit_main(ctx: click.Context, limit: int, output_format: str) -> None:
     audit_logger = ctx.obj.get("audit_logger") or AuditLogger()
 
     try:
-        entries = audit_logger.get_audit_log(limit=limit)
+        entries, skipped = audit_logger.get_audit_log_with_skipped(limit=limit)
+
+        if skipped:
+            # A damaged journal is exactly what someone reading the journal
+            # needs to know. The count goes to stderr for machine-readable
+            # formats so it never lands in the payload.
+            print_status(
+                f"⚠️  {skipped} malformed line(s) were skipped in the audit journal",
+                output_format=output_format,
+                style="yellow",
+            )
 
         if not entries:
             console.print("📋 No audit entries found", style="yellow")
@@ -2057,7 +2067,17 @@ def audit(ctx: click.Context, limit: int, output_format: str) -> None:
     audit_logger = ctx.obj.get("audit_logger") or AuditLogger()
 
     try:
-        entries = audit_logger.get_audit_log(limit=limit)
+        entries, skipped = audit_logger.get_audit_log_with_skipped(limit=limit)
+
+        if skipped:
+            # A damaged journal is exactly what someone reading the journal
+            # needs to know. The count goes to stderr for machine-readable
+            # formats so it never lands in the payload.
+            print_status(
+                f"⚠️  {skipped} malformed line(s) were skipped in the audit journal",
+                output_format=output_format,
+                style="yellow",
+            )
 
         if not entries:
             console.print("📋 No audit entries found", style="yellow")
@@ -2112,8 +2132,10 @@ def clear_audit(ctx: click.Context, force: bool) -> None:
 
     try:
         audit_logger = ctx.obj.get("audit_logger") or AuditLogger()
-        # Clear by writing empty file
-        audit_logger._audit_file.write_text("")
+        # Clearing takes the writer lock and publishes atomically: an
+        # in-place truncate would reintroduce exactly the tear that clearing
+        # is meant to remove.
+        audit_logger.clear_audit_log()
         console.print("✅ Audit log cleared successfully", style="green")
     except Exception as e:
         console.print(f"❌ Error clearing audit log: {e}", style="red")
