@@ -802,8 +802,7 @@ class IssueManager:
         state: str | None = None,
         assignee: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Yield issues one at a time, fetched in bounded pages, for streaming
-        (NDJSON) output.
+        """Yield issues one at a time, fetched in bounded pages, for streaming (NDJSON) output.
 
         Applies the same field/query/state filtering as list_issues but never
         holds the whole result set in memory — each page is emitted as it arrives,
@@ -849,9 +848,12 @@ class IssueManager:
                 return
 
     async def _discover_state_field_name(self, project_id: str | None) -> str | None:
-        """Resolve the project's actual state field name (State/Status/Stage/...)
-        for building a server-side state filter. Returns None when it cannot be
-        determined — e.g. no project was given, or discovery failed."""
+        """Resolve the project's actual state field name for a server-side state filter.
+
+        The name is whatever the project actually uses (State/Status/Stage/...).
+        Returns None when it cannot be determined — e.g. no project was given, or
+        discovery failed.
+        """
         if not project_id:
             return None
         try:
