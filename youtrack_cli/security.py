@@ -3,6 +3,10 @@
 import json
 import os
 import re
+import stat
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +17,11 @@ from keyring.errors import PasswordDeleteError
 from pydantic import BaseModel, Field
 
 from .logging import get_logger
+
+try:  # pragma: no cover - exercised on POSIX, absent on Windows
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 __all__ = [
     "AuditLogger",
@@ -50,15 +59,23 @@ class AuditEntry(BaseModel):
 class AuditLogger:
     """Manages command audit logging."""
 
-    def __init__(self, config: SecurityConfig | None = None):
+    def __init__(self, config: SecurityConfig | None = None, audit_file: Path | str | None = None):
         """Initialize audit logger.
 
         Args:
             config: Security configuration
+            audit_file: Optional path of the audit journal. Defaults to the
+                per-user journal under ``XDG_DATA_HOME``. Tests pass a scratch
+                path here rather than reaching into the private
+                ``_audit_file`` attribute.
         """
         self.config = config or SecurityConfig()
         self.logger = get_logger("youtrack_cli.security.audit")
-        self._audit_file = self._get_audit_file_path()
+        if audit_file is None:
+            self._audit_file = self._get_audit_file_path()
+        else:
+            self._audit_file = Path(audit_file)
+            self._audit_file.parent.mkdir(parents=True, exist_ok=True)
 
     def _get_audit_file_path(self) -> Path:
         """Get the audit log file path."""
@@ -70,6 +87,64 @@ class AuditLogger:
 
         audit_dir.mkdir(parents=True, exist_ok=True)
         return audit_dir / "audit.log"
+
+    @property
+    def _lock_file(self) -> Path:
+        """Path of the writer lock file.
+
+        The lock lives on its own inode on purpose. Publishing the journal
+        with ``os.replace`` retires the journal's inode, so a lock held on
+        the journal itself would end up held on a file that is no longer the
+        journal, and a second writer would take a lock nobody else can see.
+        """
+        return self._audit_file.with_name(f"{self._audit_file.name}.lock")
+
+    @contextmanager
+    def _writer_lock(self) -> Iterator[None]:
+        """Serialise writers with an exclusive lock on the lock file.
+
+        The journal is written by a read-modify-write, which is a lost-update
+        race that an atomic publish does not fix: two writers can both read
+        the same snapshot and the last publish wins. This lock closes that
+        window.
+
+        A journal failure must never fail the command, so a lock that cannot
+        be created or taken is reported and the write proceeds without it --
+        degraded (concurrent writers may lose entries) but not broken. The
+        tolerant read and the atomic publish still apply in that case; only
+        the writer serialisation is lost.
+        """
+        if fcntl is None:
+            self.logger.warning(
+                "Audit journal writer lock unavailable on this platform; concurrent writers may lose entries"
+            )
+            yield
+            return
+
+        lock_path = self._lock_file
+        fd: int | None = None
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as e:
+            self.logger.warning(
+                "Audit journal writer lock unavailable; concurrent writers may lose entries",
+                error=str(e),
+            )
+            if fd is not None:
+                os.close(fd)
+                fd = None
+
+        try:
+            yield
+        finally:
+            if fd is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(fd)
 
     def log_command(
         self,
@@ -129,43 +204,125 @@ class AuditLogger:
         return masked_args
 
     def _write_audit_entry(self, entry: AuditEntry) -> None:
-        """Write an audit entry to the log file."""
+        """Write an audit entry to the log file.
+
+        The read-modify-write runs under the writer lock and publishes
+        atomically, so a concurrent writer cannot lose this entry and a
+        concurrent reader never sees a half-written journal.
+        """
         try:
-            # Read existing entries
-            entries = self._read_audit_entries()
+            with self._writer_lock():
+                # Read existing entries
+                entries = self._read_audit_entries()
 
-            # Add new entry
-            entries.append(entry.model_dump(mode="json", serialize_as_any=True))
+                # Add new entry
+                entries.append(entry.model_dump(mode="json", serialize_as_any=True))
 
-            # Keep only the most recent entries
-            if len(entries) > self.config.audit_log_max_entries:
-                entries = entries[-self.config.audit_log_max_entries :]
+                # Keep only the most recent entries
+                if len(entries) > self.config.audit_log_max_entries:
+                    entries = entries[-self.config.audit_log_max_entries :]
 
-            # Write back to file
-            with open(self._audit_file, "w") as f:
-                for entry_dict in entries:
-                    json.dump(entry_dict, f, default=str)
-                    f.write("\n")
+                # Publish the new journal
+                self._publish(entries)
 
         except Exception as e:
             self.logger.error("Failed to write audit entry", error=str(e))
 
+    def _publish(self, entries: list[dict[str, Any]]) -> None:
+        """Publish the journal atomically.
+
+        The new journal is written to a temporary file in the same directory,
+        flushed and fsynced, and then moved onto the journal with
+        ``os.replace``. A reader therefore sees either the complete old
+        journal or the complete new one, never a partial one -- which is
+        what lets the read path stay lock-free. A failed publish leaves the
+        previous journal byte-identical, because the journal itself is only
+        ever touched by the rename.
+        """
+        tmp_path = self._write_temp_file(entries)
+        try:
+            os.replace(tmp_path, self._audit_file)
+        finally:
+            # The rename consumed the temporary file; anything left is the
+            # debris of a failed publish and must not accumulate.
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _write_temp_file(self, entries: list[dict[str, Any]]) -> Path:
+        """Write the new journal to a temporary file beside the journal.
+
+        The temporary file has to live in the same directory as the journal
+        so that the rename that publishes it is atomic.
+        """
+        tmp_path = self._audit_file.with_name(f".{self._audit_file.name}.{uuid.uuid4().hex}.tmp")
+        with open(tmp_path, "w") as f:
+            for entry_dict in entries:
+                json.dump(entry_dict, f, default=str)
+                f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._preserve_mode(tmp_path)
+        return tmp_path
+
+    def _preserve_mode(self, tmp_path: Path) -> None:
+        """Give the published journal the permissions the journal already had.
+
+        The temporary file is created with the process umask, which is not
+        necessarily the mode the journal was given by its owner.
+        """
+        try:
+            mode = stat.S_IMODE(self._audit_file.stat().st_mode)
+        except OSError:
+            return
+        try:
+            os.chmod(tmp_path, mode)
+        except OSError:
+            pass
+
     def _read_audit_entries(self) -> list[dict[str, Any]]:
         """Read existing audit entries from file."""
-        if not self._audit_file.exists():
-            return []
-
-        entries = []
-        try:
-            with open(self._audit_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        entries.append(json.loads(line))
-        except Exception as e:
-            self.logger.error("Failed to read audit entries", error=str(e))
-
+        entries, _ = self._read_journal()
         return entries
+
+    def _read_journal(self) -> tuple[list[dict[str, Any]], int]:
+        """Read the journal, returning its entries and the number of skipped lines.
+
+        A malformed line is skipped and counted rather than aborting the
+        read: the journal exists to keep history, so one torn line must not
+        cost the entries around it. The count is reported once per read at
+        WARNING -- nothing failed, the command succeeded and the journal
+        recovered. An unreadable file is a different thing and stays a
+        failure.
+        """
+        if not self._audit_file.exists():
+            return [], 0
+
+        entries: list[dict[str, Any]] = []
+        skipped = 0
+        try:
+            # Read in binary so that a line which is not valid UTF-8 -- a
+            # write torn in the middle of a multi-byte character -- is
+            # skipped like any other malformed line instead of aborting the
+            # whole read.
+            with open(self._audit_file, "rb") as f:
+                for raw_line in f:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        entries.append(json.loads(raw_line.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        skipped += 1
+        except OSError as e:
+            self.logger.error("Failed to read audit entries", error=str(e))
+            return entries, skipped
+
+        if skipped:
+            self.logger.warning("Skipped malformed lines in audit journal", skipped=skipped)
+
+        return entries, skipped
 
     def get_audit_log(self, limit: int | None = None) -> list[AuditEntry]:
         """Get audit log entries.
@@ -176,7 +333,23 @@ class AuditLogger:
         Returns:
             List of audit entries
         """
-        entries_data = self._read_audit_entries()
+        entries, _ = self.get_audit_log_with_skipped(limit)
+        return entries
+
+    def get_audit_log_with_skipped(self, limit: int | None = None) -> tuple[list[AuditEntry], int]:
+        """Get audit log entries and the number of malformed lines skipped.
+
+        The count is what tells a reader that the journal is damaged: the
+        entries are the history that survived, the count is the history that
+        did not.
+
+        Args:
+            limit: Maximum number of entries to return
+
+        Returns:
+            Tuple of the audit entries and the number of skipped lines
+        """
+        entries_data, skipped = self._read_journal()
         entries = []
 
         for entry_data in entries_data:
@@ -194,7 +367,17 @@ class AuditLogger:
         if limit:
             entries = entries[-limit:]
 
-        return entries
+        return entries, skipped
+
+    def clear_audit_log(self) -> None:
+        """Clear the audit journal.
+
+        Clearing takes the same writer lock and publishes atomically: an
+        in-place truncate would reintroduce exactly the tear that clearing
+        is meant to remove.
+        """
+        with self._writer_lock():
+            self._publish([])
 
 
 class CredentialManager:

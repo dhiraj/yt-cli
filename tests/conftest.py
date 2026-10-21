@@ -1,6 +1,7 @@
 """Global test configuration and fixtures."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +17,15 @@ def isolate_home(tmp_path_factory):
     ``~/.config/youtrack-cli/.env``.  Pointing the home directory at a
     throwaway one keeps every one of those paths inside the test run.
 
+    Setting ``HOME`` is not enough on its own.  Some tests wipe
+    ``os.environ`` wholesale to exercise the "no environment variables"
+    path, and that takes ``HOME`` with it; ``Path.home()`` then falls back
+    to the password database, which is the developer's real home.  The CLI
+    writes its audit journal and its log file there, so a test that clears
+    the environment can append to the developer's real audit journal.  The
+    home directory is therefore pinned for the whole session, so that a
+    cleared environment cannot reach it.
+
     This completes the isolation the other fixtures in this file already
     perform for the remaining credential carriers: the environment variables
     (``isolate_environment``), the keyring (``isolate_keyring``) and the
@@ -25,9 +35,25 @@ def isolate_home(tmp_path_factory):
     original = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE")}
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
+
+    original_home = Path.home
+    original_expanduser = os.path.expanduser
+
+    def pinned_home(cls=None):
+        return Path(home)
+
+    def pinned_expanduser(path):
+        if path.startswith("~"):
+            return str(home) + path[1:]
+        return original_expanduser(path)
+
+    Path.home = classmethod(pinned_home)
+    os.path.expanduser = pinned_expanduser
     try:
         yield home
     finally:
+        Path.home = original_home
+        os.path.expanduser = original_expanduser
         for key, value in original.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -41,13 +67,20 @@ def isolate_environment():
     # YouTrack environment variables that could cause test contamination
     youtrack_env_vars = ["YOUTRACK_BASE_URL", "YOUTRACK_TOKEN", "YOUTRACK_USERNAME", "YOUTRACK_VERIFY_SSL"]
 
+    # XDG_DATA_HOME redirects the audit journal and the log file. The CLI
+    # prefers it over the home directory, so on a machine that sets it a
+    # test's AuditLogger() would write to the developer's real journal
+    # instead of the throwaway home. Clear it alongside the YouTrack
+    # variables so the journal follows HOME like every other path.
+    data_home_vars = ["XDG_DATA_HOME"]
+
     # Store original values
     original_env: dict[str, str | None] = {}
-    for key in youtrack_env_vars:
+    for key in youtrack_env_vars + data_home_vars:
         original_env[key] = os.environ.get(key)
 
     # Clear YouTrack environment variables before each test
-    for key in youtrack_env_vars:
+    for key in youtrack_env_vars + data_home_vars:
         if key in os.environ:
             del os.environ[key]
 

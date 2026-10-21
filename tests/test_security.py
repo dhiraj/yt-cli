@@ -78,8 +78,7 @@ class TestAuditLogger:
     def test_log_command(self):
         """Test command logging."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger = AuditLogger()
-            logger._audit_file = Path(temp_dir) / "test_audit.log"
+            logger = AuditLogger(audit_file=Path(temp_dir) / "test_audit.log")
 
             logger.log_command(
                 command="issues",
@@ -103,10 +102,9 @@ class TestAuditLogger:
     def test_log_command_disabled(self):
         """Test that logging is disabled when configured."""
         config = SecurityConfig(enable_audit_logging=False)
-        logger = AuditLogger(config)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger._audit_file = Path(temp_dir) / "test_audit.log"
+            logger = AuditLogger(config, audit_file=Path(temp_dir) / "test_audit.log")
 
             logger.log_command("test", ["arg"])
 
@@ -116,10 +114,9 @@ class TestAuditLogger:
     def test_audit_log_rotation(self):
         """Test audit log entry limit enforcement."""
         config = SecurityConfig(audit_log_max_entries=3)
-        logger = AuditLogger(config)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger._audit_file = Path(temp_dir) / "test_audit.log"
+            logger = AuditLogger(config, audit_file=Path(temp_dir) / "test_audit.log")
 
             # Add 5 entries
             for i in range(5):
@@ -420,10 +417,8 @@ class TestSecurityIntegration:
 
     def test_audit_logger_masks_sensitive_data(self):
         """Test that audit logger automatically masks sensitive data."""
-        logger = AuditLogger()
-
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger._audit_file = Path(temp_dir) / "test_audit.log"
+            logger = AuditLogger(audit_file=Path(temp_dir) / "test_audit.log")
 
             # Log command with sensitive data
             logger.log_command(
@@ -474,10 +469,8 @@ class TestSecurityPerformance:
 
     def test_audit_log_performance(self):
         """Test audit logging performance with many entries."""
-        logger = AuditLogger()
-
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger._audit_file = Path(temp_dir) / "performance_test.log"
+            logger = AuditLogger(audit_file=Path(temp_dir) / "performance_test.log")
 
             # Log many entries quickly
             import time

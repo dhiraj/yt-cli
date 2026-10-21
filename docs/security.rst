@@ -24,6 +24,22 @@ All CLI commands are automatically logged with timestamps for security auditing 
 - Automatically masks sensitive information (tokens, passwords, API keys)
 - Configurable storage limits (default: 1000 entries)
 - JSON export capability for integration with external systems
+- Survives concurrent use: the journal is published atomically and the
+  writers are serialised, so running several ``yt`` commands at once cannot
+  tear the journal or lose entries
+
+**Storage:**
+
+The journal is a JSONL file at ``$XDG_DATA_HOME/youtrack-cli/audit.log``
+(``~/.local/share/youtrack-cli/audit.log`` when ``XDG_DATA_HOME`` is not
+set). A lock file, ``audit.log.lock``, sits beside it: the writers take an
+exclusive lock on it while they write, which is what keeps two ``yt``
+processes from overwriting each other's entries.
+
+A journal that is damaged is repaired rather than discarded. A line that
+cannot be parsed is skipped, the rest of the journal is kept, and the number
+of skipped lines is reported as a warning. ``yt security audit`` reports the
+same count, so a journal that is losing history says so.
 
 **Usage:**
 
