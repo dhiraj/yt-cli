@@ -52,23 +52,29 @@ class IssueService(BaseService):
                 issue_data["description"] = description
 
             # Handle custom fields - Priority, Type, and Assignee are typically custom fields in YouTrack
+            #
+            # Priority and Type are built by the same builder the `-cf` path uses, and
+            # for the same reasons: the field's own vocabulary decides whether the value
+            # is written by its display name or by its id, and the field's own type
+            # decides the payload's shape. The hard-coded `$type`s this replaces were a
+            # guess about every project but this one -- a project whose Priority is not
+            # an enum was written with an enum payload, and a project whose state field
+            # was written as `SingleEnumIssueCustomField`.
             if priority:
-                custom_fields_list.append(
-                    {
-                        "$type": "SingleEnumIssueCustomField",
-                        "name": "Priority",
-                        "value": {"$type": "EnumBundleElement", "name": priority},
-                    }
+                payload, error = await self._build_bundle_backed_field(
+                    project_id, "Priority", priority, "The issue was not created."
                 )
+                if error:
+                    return self._create_error_response(error)
+                custom_fields_list.append(payload)
 
             if issue_type:
-                custom_fields_list.append(
-                    {
-                        "$type": "SingleEnumIssueCustomField",
-                        "name": "Type",
-                        "value": {"$type": "EnumBundleElement", "name": issue_type},
-                    }
+                payload, error = await self._build_bundle_backed_field(
+                    project_id, "Type", issue_type, "The issue was not created."
                 )
+                if error:
+                    return self._create_error_response(error)
+                custom_fields_list.append(payload)
 
             if assignee:
                 custom_fields_list.append(
@@ -189,11 +195,9 @@ class IssueService(BaseService):
         try:
             update_data: dict[str, Any] = {"$type": "Issue"}
             custom_fields_list = []
-            # Resolved lazily below. The state path needs it, and the
-            # custom-field path needs it to discover each field's real type.
-            # Binding it here keeps a custom-fields-only update from reading an
-            # unbound local -- which used to be swallowed and silently downgrade
-            # every field to a guessed enum.
+            # Resolved once, below, when a field is being written: the project's own
+            # vocabulary is what decides how a value is addressed, so every field path
+            # needs to know which project it is writing to.
             project_id: str | None = None
 
             # Handle regular fields
@@ -202,60 +206,15 @@ class IssueService(BaseService):
             if description is not None:
                 update_data["description"] = description
 
+            if state is not None or priority is not None or issue_type is not None or custom_fields:
+                project_id = await self._get_project_id_from_issue(issue_id)
+
             # Handle state field with dynamic discovery
             if state is not None:
-                state_field_added = False
-                try:
-                    # First, get the project ID from the issue
-                    project_id = await self._get_project_id_from_issue(issue_id)
-                    if project_id:
-                        # Discover the correct state field for this project
-                        state_field_info = await self._discover_state_field_for_project(project_id)
-                        if state_field_info:
-                            custom_fields_list.append(
-                                {
-                                    "$type": "SingleEnumIssueCustomField",
-                                    "name": state_field_info["field_name"],
-                                    "value": {"$type": state_field_info["bundle_type"], "name": state},
-                                }
-                            )
-                            state_field_added = True
-                        else:
-                            # Field discovery failed - get available fields for error message
-                            from .projects import ProjectService
-
-                            project_service = ProjectService(self.auth_manager)
-                            fields_result = await project_service.get_project_custom_fields(
-                                project_id, "id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType,name)"
-                            )
-
-                            available_fields = []
-                            if fields_result["status"] == "success":
-                                available_fields = [
-                                    f.get("field", {}).get("name", "")
-                                    for f in fields_result["data"]
-                                    if f.get("field", {}).get("name")
-                                ]
-
-                            return self._create_error_response(
-                                f"No state field found for project '{project_id}'. "
-                                f"Available custom fields: {', '.join(available_fields) if available_fields else 'None'}. "
-                                f"Please check if the project has a state/status field configured."
-                            )
-                except Exception:
-                    # Log the exception but continue with fallback
-                    pass
-
-                # Use fallback only if field discovery didn't work
-                if not state_field_added:
-                    # Use StateBundleElement for state-type fields (consistent with move_issue logic)
-                    custom_fields_list.append(
-                        {
-                            "$type": "SingleEnumIssueCustomField",
-                            "name": "State",
-                            "value": {"$type": "StateBundleElement", "name": state},
-                        }
-                    )
+                payload, error = await self._build_state_field(issue_id, project_id, state, "No values were sent.")
+                if error:
+                    return self._create_error_response(error)
+                custom_fields_list.append(payload)
 
             # Handle assignee field (custom field)
             if assignee is not None:
@@ -267,25 +226,23 @@ class IssueService(BaseService):
                     }
                 )
 
-            # Handle priority field (keep existing logic for now)
+            # Handle priority field, through the same builder the `-cf` path uses
             if priority is not None:
-                custom_fields_list.append(
-                    {
-                        "$type": "SingleEnumIssueCustomField",
-                        "name": "Priority",
-                        "value": {"$type": "EnumBundleElement", "name": priority},
-                    }
+                payload, error = await self._build_issue_field(
+                    issue_id, project_id, "Priority", priority, "No values were sent."
                 )
+                if error:
+                    return self._create_error_response(error)
+                custom_fields_list.append(payload)
 
-            # Handle issue type field (as custom field, consistent with create_issue)
+            # Handle issue type field, through the same builder the `-cf` path uses
             if issue_type is not None:
-                custom_fields_list.append(
-                    {
-                        "$type": "SingleEnumIssueCustomField",
-                        "name": "Type",
-                        "value": {"$type": "EnumBundleElement", "name": issue_type},
-                    }
+                payload, error = await self._build_issue_field(
+                    issue_id, project_id, "Type", issue_type, "No values were sent."
                 )
+                if error:
+                    return self._create_error_response(error)
+                custom_fields_list.append(payload)
 
             # Handle generic custom fields with field type discovery
             if custom_fields:
@@ -399,6 +356,95 @@ class IssueService(BaseService):
             return None
         except Exception:
             return None
+
+    async def _build_bundle_backed_field(
+        self,
+        project_id: str,
+        field_name: str,
+        value: str,
+        context: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Build the payload for one bundle-backed field value.
+
+        The field's own vocabulary decides how the value is addressed -- by its display
+        name or by its id -- and the same builder the `-cf` path uses builds it, so
+        there is one grammar for a field value rather than two. The field's own type
+        decides the payload's shape as well, so a project whose Priority is not an enum
+        is no longer written with an enum payload.
+
+        Returns ``(payload, None)`` on success, and ``(None, message)`` on failure,
+        where the message says what was left unsent.
+        """
+        from .projects import ProjectService
+
+        project_service = ProjectService(self.auth_manager)
+        field_info_result = await project_service.discover_custom_field(project_id, field_name)
+        if field_info_result["status"] != "success":
+            return None, (
+                f"Could not determine the type of field '{field_name}': {field_info_result.get('message')}. {context}"
+            )
+
+        try:
+            return (
+                CustomFieldManager.create_field_by_type(field_info_result["data"], field_name, [value]),
+                None,
+            )
+        except CustomFieldWriteRefusal as e:
+            message = e.message
+            if e.suggestion:
+                message = f"{message}. {e.suggestion}"
+            return None, f"{message}. {context}"
+
+    async def _build_issue_field(
+        self,
+        issue_id: str,
+        project_id: str | None,
+        field_name: str,
+        value: str,
+        context: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Build the payload for a field on an existing issue."""
+        if project_id is None:
+            return None, (
+                f"Could not resolve the project for issue '{issue_id}', so the type of field "
+                f"'{field_name}' cannot be discovered. {context}"
+            )
+        return await self._build_bundle_backed_field(project_id, field_name, value, context)
+
+    async def _build_state_field(
+        self,
+        issue_id: str,
+        project_id: str | None,
+        state: str,
+        context: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Build the payload for a state change.
+
+        The project's own state field is located by the project's vocabulary rather
+        than assumed to be called "State", and the state itself is addressed by display
+        name or by id -- both of which the `-cf "State=..."` path already does, and both
+        of which the flag path now does too.
+        """
+        if project_id is None:
+            return None, (
+                f"Could not resolve the project for issue '{issue_id}', so the state field "
+                f"cannot be discovered. {context}"
+            )
+
+        from .projects import ProjectService
+
+        project_service = ProjectService(self.auth_manager)
+        state_field_result = await project_service.discover_state_field(project_id)
+        if state_field_result["status"] != "success":
+            available = ", ".join(state_field_result.get("available_fields") or []) or "None"
+            return None, (
+                f"No state field found for project '{project_id}'. "
+                f"Available custom fields: {available}. "
+                f"Please check if the project has a state/status field configured. {context}"
+            )
+
+        field_name = state_field_result["data"]["field_name"]
+        return await self._build_bundle_backed_field(project_id, field_name, state, context)
 
     async def _discover_state_field_for_project(self, project_id: str) -> dict[str, Any] | None:
         """Discover state field information for a project."""
@@ -611,66 +657,17 @@ class IssueService(BaseService):
                 return await self._move_issue_to_project(issue_id, project_id)
 
             # Handle state field with dynamic discovery (same approach as update_issue)
-            state_field_added = False
-            try:
-                # First, get the project ID from the issue
-                project_id_from_issue = await self._get_project_id_from_issue(issue_id)
-                if project_id_from_issue:
-                    # Discover the correct state field for this project
-                    state_field_info = await self._discover_state_field_for_project(project_id_from_issue)
-                    if state_field_info:
-                        # Use discovered field information
-                        update_data = {
-                            "$type": "Issue",
-                            "customFields": [
-                                {
-                                    "$type": "SingleEnumIssueCustomField",
-                                    "name": state_field_info["field_name"],
-                                    "value": {"$type": state_field_info["bundle_type"], "name": state},
-                                }
-                            ],
-                        }
-                        state_field_added = True
-                    else:
-                        # Field discovery failed - get available fields for error message
-                        from .projects import ProjectService
+            project_id_from_issue = await self._get_project_id_from_issue(issue_id)
+            payload, error = await self._build_state_field(
+                issue_id, project_id_from_issue, state, "No values were sent."
+            )
+            if error:
+                return self._create_error_response(error)
 
-                        project_service = ProjectService(self.auth_manager)
-                        fields_result = await project_service.get_project_custom_fields(
-                            project_id_from_issue,
-                            "id,name,fieldType,localizedName,isPublic,ordinal,field(fieldType,name)",
-                        )
-
-                        available_fields = []
-                        if fields_result["status"] == "success":
-                            available_fields = [
-                                f.get("field", {}).get("name", "")
-                                for f in fields_result["data"]
-                                if f.get("field", {}).get("name")
-                            ]
-
-                        return self._create_error_response(
-                            f"No state field found for project '{project_id_from_issue}'. "
-                            f"Available custom fields: {', '.join(available_fields) if available_fields else 'None'}. "
-                            f"Please check if the project has a state/status field configured."
-                        )
-            except Exception:
-                # Log the exception but continue with fallback
-                pass
-
-            # Use fallback only if field discovery didn't work
-            if not state_field_added:
-                # Use StateBundleElement for state-type fields (consistent with update_issue logic)
-                update_data = {
-                    "$type": "Issue",
-                    "customFields": [
-                        {
-                            "$type": "SingleEnumIssueCustomField",
-                            "name": "State",
-                            "value": {"$type": "StateBundleElement", "name": state},
-                        }
-                    ],
-                }
+            update_data = {
+                "$type": "Issue",
+                "customFields": [payload],
+            }
 
             response = await self._make_request("POST", f"issues/{issue_id}", json_data=update_data)
             result = await self._handle_response(response, success_codes=[200, 204])

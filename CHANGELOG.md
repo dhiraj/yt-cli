@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ✨ A value of a bundle-backed field can now be written by its **id** as well as by its
+  display name, on every write path. `-cf "State=159-2"` and `-cf "State=In Progress"` set
+  the same value, and so do `--priority`, `--type` and `--state` — the flag paths now go
+  through the same builder the `-cf` path uses, so there is one grammar for a field value
+  rather than two. Until now only the name could be written: every bundle-element builder
+  emitted `{"name": …}` with no id branch to fall through to, and the pre-flight check
+  compared the value against the field's value *names* only, so an id was refused before
+  any request was made — while the field's own vocabulary, which carries the ids, was
+  already in hand. The id goes on the wire as the id and not as the name it currently has:
+  the id is the only identifier a rename cannot invalidate, and the CLI caches field
+  discovery for five minutes, so a name resolved through the cache could be a stale one.
+  Which of the two a token is comes from the field's own vocabulary and never from the
+  token's shape — a legal value name can look exactly like an id (a version field
+  routinely carries names like `2026-1`), so a rule that recognised ids by their pattern
+  would mis-address such a name. A token that is neither a name nor an id of that field is
+  still refused locally, before any request is made, and the refusal now names the field's
+  legal values with the id each of them can also be addressed by. Verified live against a
+  real project before the change was merged: the server accepts an id-addressed value, a
+  state field written by id lands as that state, and an id belonging to another field's
+  bundle is refused locally, with the request never made. A **user** field is not
+  addressed by id — its value is a user, addressed by login, and a project may attach
+  teams to the same field, which is a different id space
+
 ### Fixed
 - 🐛 The pre-flight check on `--priority` and `--type` now runs against the field the caller
   named, instead of against a guess at one. The project API answers with a field's name nested
@@ -80,6 +104,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the full `pre-commit` run
 
 ### Changed
+- ℹ️ `--priority`, `--type` and `--state` are now built from the field's own discovered type
+  rather than from a hard-coded one. The flag paths built their payloads inline, with a
+  hard-coded `$type` and no field discovery at all, so three things were possible that
+  should not have been: a **state** field was written as `SingleEnumIssueCustomField` when
+  its issue-side type is `StateIssueCustomField`; a project whose Priority is not an enum
+  was written with an enum payload; and a value could not be addressed by id on those
+  flags at all. The flag paths now resolve the field the way the `-cf` path already did,
+  which is also why they need the project's field settings to be readable — the same
+  permission the `-cf` path has always needed. When the field cannot be found, the write
+  is refused with the reason instead of being sent as a guessed enum
 - ℹ️ `yt issues create` now says what happened on stdout and what went wrong on stderr. The
   failure detail was printed to stdout while stderr carried only a generic
   `Error: Failed to create issue` — the inverse of the contract the rest of the CLI works

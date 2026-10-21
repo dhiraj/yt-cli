@@ -8,8 +8,8 @@ from rich.table import Table
 
 from ..auth import AuthManager
 from ..console import get_console
-from ..custom_field_manager import CustomFieldManager
-from ..exceptions import YouTrackError
+from ..custom_field_manager import CustomFieldManager, resolve_bundle_value
+from ..exceptions import CustomFieldWriteRefusal, YouTrackError
 from ..logging import get_logger
 from ..pagination import create_paginated_display
 from ..panels import (
@@ -549,9 +549,13 @@ class IssueManager:
             was checked was a heuristic guess rather than the caller's field)
         """
         try:
-            # Get project custom fields to find the field
+            # Get project custom fields to find the field. The value ids are asked for
+            # in the same read: a value may be addressed by its display name or by its
+            # id, and the id cannot be checked against the field's vocabulary without
+            # being in hand -- so a selector that omitted it would refuse every id
+            # while looking like a working vocabulary check.
             fields_result = await self.project_service.get_project_custom_fields(
-                project_id, fields="id,name,fieldType,bundle(values(name))"
+                project_id, fields="id,name,fieldType,bundle(values(name,id))"
             )
 
             if fields_result["status"] != "success":
@@ -616,13 +620,18 @@ class IssueManager:
                 # If no bundle values, allow any value (might be a text field)
                 return {"valid": True, "message": "", "field_id": field_id, "guessed": guessed}
 
-            # Check if the provided value is in the valid values
-            valid_value_names = [v.get("name", "") for v in valid_values if isinstance(v, dict)]
-
-            if value not in valid_value_names:
+            # The value is accepted if it is a display name of this field's values or
+            # the id of one of them -- the same rule the payload builder applies, so
+            # the two never disagree about what this field accepts. A token that is
+            # neither is refused here, with the field's legal values named, rather
+            # than left to the server's "no such entity" message: a typo must stay an
+            # actionable local refusal.
+            try:
+                resolve_bundle_value(value, valid_values, field_name)
+            except CustomFieldWriteRefusal as e:
                 return {
                     "valid": False,
-                    "message": f"'{value}' is not a valid {field_name}. Valid values: {', '.join(valid_value_names)}",
+                    "message": e.message,
                     "field_id": field_id,
                     "guessed": guessed,
                 }

@@ -6,17 +6,135 @@ custom fields across the YouTrack CLI application, reducing code duplication and
 improving maintainability.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .custom_field_types import CustomFieldValueTypes, IssueCustomFieldTypes, get_display_name
 from .exceptions import (
     CustomFieldMultiplicityUnknownError,
     CustomFieldUnresolvedReason,
+    CustomFieldValueAmbiguousError,
     CustomFieldValueCountError,
     CustomFieldValueTypeError,
+    CustomFieldValueUnresolvedError,
     UnsupportedCustomFieldTypeError,
 )
+
+
+def format_bundle_values(values: Sequence[Mapping[str, Any]]) -> str:
+    """The field's legal values, in a form a reader can act on.
+
+    Each value is listed as ``name (id)`` when it carries an id, because a value may be
+    addressed by either and a reader who has just been refused has to be able to see
+    which form would have been accepted. A value with no id is listed by its name
+    alone.
+    """
+    listed: list[str] = []
+    for value in values or ():
+        if not isinstance(value, Mapping):
+            continue
+        name = value.get("name")
+        identifier = value.get("id")
+        if name and identifier:
+            listed.append(f"{name} ({identifier})")
+        elif name:
+            listed.append(str(name))
+        elif identifier:
+            listed.append(str(identifier))
+    return ", ".join(listed)
+
+
+def resolve_bundle_value(
+    token: str,
+    values: Sequence[Mapping[str, Any]] | None,
+    field_name: str = "",
+) -> tuple[str, str]:
+    """Decide whether a token names a bundle value or identifies one by its id.
+
+    The decision is made against the field's own vocabulary and never against the
+    token's shape: a legal value *name* can look exactly like an id -- a version field
+    routinely carries names like ``2026-1`` -- so a rule that recognised ids by their
+    pattern would silently mis-address such a name.
+
+    Returns ``("name", token)`` or ``("id", token)``: the form, and the value to put
+    on the wire. For an id that is the id itself, not the name the id currently has:
+    the id is the only identifier a rename cannot invalidate, and the CLI caches field
+    discovery for five minutes, so a name resolved through the cache could be a stale
+    one.
+
+    Raises:
+        CustomFieldValueUnresolvedError: the token is neither a name nor an id of this
+            field.
+        CustomFieldValueAmbiguousError: the token is both a name and an id of this
+            field, so neither reading can be chosen.
+    """
+    by_id: dict[str, Mapping[str, Any]] = {}
+    by_name: dict[str, Mapping[str, Any]] = {}
+    for value in values or ():
+        if not isinstance(value, Mapping):
+            continue
+        identifier = value.get("id")
+        if identifier:
+            by_id.setdefault(str(identifier), value)
+        name = value.get("name")
+        if name:
+            by_name.setdefault(str(name), value)
+
+    known_as_id = token in by_id
+    known_as_name = token in by_name
+
+    if known_as_id and known_as_name:
+        raise CustomFieldValueAmbiguousError(field_name, token)
+    if known_as_id:
+        return ("id", token)
+    if known_as_name:
+        return ("name", token)
+
+    raise CustomFieldValueUnresolvedError(field_name, token, format_bundle_values(values or ()))
+
+
+def bundle_vocabulary(field_info: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The field's own bundle vocabulary, as field discovery reported it.
+
+    Discovery reads the field's bundle with the value ids included, so the ids are in
+    hand by the time a payload is built -- no extra round-trip is needed to address a
+    value by id. A field whose bundle was not reported has no vocabulary to resolve
+    against, and the list is empty.
+    """
+    details = field_info.get("field_details")
+    if not isinstance(details, Mapping):
+        return []
+    bundle = details.get("bundle")
+    if not isinstance(bundle, Mapping):
+        return []
+    values = bundle.get("values")
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, Mapping)]
+
+
+def _bundle_element(
+    token: str,
+    element_type: str,
+    vocabulary: Sequence[Mapping[str, Any]] | None,
+    field_name: str,
+) -> dict[str, Any]:
+    """Build one bundle element, addressed by display name or by id.
+
+    The element carries whichever form the resolver chose: ``{"name": ...}`` for a
+    name, ``{"id": ...}`` for an id. There is no third form, and no builder decides
+    the form for itself -- every bundle-backed builder goes through here, so the rule
+    holds the same way on every write path.
+
+    A field whose vocabulary is not available -- the bundle was not reported, or
+    reports no values at all -- has nothing to resolve against, so the value is
+    written by name: with no values in hand there is no id the token could have meant,
+    and the server stays the authority on whether that name exists.
+    """
+    if not vocabulary:
+        return {"$type": element_type, "name": token}
+    form, value = resolve_bundle_value(token, vocabulary, field_name)
+    return {"$type": element_type, form: value}
 
 
 def _require_single_value(name: str, values: list[Any], issue_field_type: str | None) -> None:
@@ -51,13 +169,17 @@ class CustomFieldManager:
     """Centralized manager for YouTrack custom field operations."""
 
     @staticmethod
-    def create_single_enum_field(name: str, value: str) -> dict[str, Any]:
+    def create_single_enum_field(
+        name: str, value: str, *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a single enum custom field dictionary.
 
         Args:
             name: The field name
-            value: The enum value name
+            value: The enum value, by display name or by the id of one of the field's values
+            vocabulary: The field's own bundle values, as discovery reported them. The
+                value is addressed by whichever of the two the vocabulary says it is.
 
         Returns:
             Dictionary representing the custom field
@@ -65,17 +187,21 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.SINGLE_ENUM,
             "name": name,
-            "value": {"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": value},
+            "value": _bundle_element(value, CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, vocabulary, name),
         }
 
     @staticmethod
-    def create_multi_enum_field(name: str, values: list[str]) -> dict[str, Any]:
+    def create_multi_enum_field(
+        name: str, values: list[str], *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a multi enum custom field dictionary.
 
         Args:
             name: The field name
-            values: List of enum value names
+            values: The enum values, each by display name or by the id of one of the
+                field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -83,17 +209,22 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.MULTI_ENUM,
             "name": name,
-            "value": [{"$type": CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, "name": value} for value in values],
+            "value": [
+                _bundle_element(value, CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT, vocabulary, name) for value in values
+            ],
         }
 
     @staticmethod
-    def create_state_field(name: str, value: str) -> dict[str, Any]:
+    def create_state_field(
+        name: str, value: str, *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a state custom field dictionary.
 
         Args:
             name: The field name
-            value: The state value name
+            value: The state, by display name or by the id of one of the field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -101,11 +232,13 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.STATE,
             "name": name,
-            "value": {"$type": CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, "name": value},
+            "value": _bundle_element(value, CustomFieldValueTypes.STATE_BUNDLE_ELEMENT, vocabulary, name),
         }
 
     @staticmethod
-    def create_single_owned_field(name: str, owned_name: str) -> dict[str, Any]:
+    def create_single_owned_field(
+        name: str, owned_name: str, *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a single owned custom field dictionary.
 
@@ -115,7 +248,9 @@ class CustomFieldManager:
 
         Args:
             name: The field name
-            owned_name: The owned value name
+            owned_name: The owned value, by display name or by the id of one of the
+                field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -123,7 +258,7 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.SINGLE_OWNED,
             "name": name,
-            "value": {"$type": CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT, "name": owned_name},
+            "value": _bundle_element(owned_name, CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT, vocabulary, name),
         }
 
     @staticmethod
@@ -445,13 +580,16 @@ class CustomFieldManager:
         }
 
     @staticmethod
-    def create_single_version_field(name: str, value: str) -> dict[str, Any]:
+    def create_single_version_field(
+        name: str, value: str, *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a single version custom field.
 
         Args:
             name: The field name
-            value: The version name
+            value: The version, by display name or by the id of one of the field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -459,17 +597,20 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.SINGLE_VERSION,
             "name": name,
-            "value": {"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": value},
+            "value": _bundle_element(value, CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, vocabulary, name),
         }
 
     @staticmethod
-    def create_single_build_field(name: str, value: str) -> dict[str, Any]:
+    def create_single_build_field(
+        name: str, value: str, *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a single build custom field.
 
         Args:
             name: The field name
-            value: The build name
+            value: The build, by display name or by the id of one of the field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -477,17 +618,21 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.SINGLE_BUILD,
             "name": name,
-            "value": {"$type": CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT, "name": value},
+            "value": _bundle_element(value, CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT, vocabulary, name),
         }
 
     @staticmethod
-    def create_multi_version_field(name: str, values: list[str]) -> dict[str, Any]:
+    def create_multi_version_field(
+        name: str, values: list[str], *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a multi version custom field.
 
         Args:
             name: The field name
-            values: List of version names
+            values: The versions, each by display name or by the id of one of the
+                field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -495,17 +640,23 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.MULTI_VERSION,
             "name": name,
-            "value": [{"$type": CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, "name": value} for value in values],
+            "value": [
+                _bundle_element(value, CustomFieldValueTypes.VERSION_BUNDLE_ELEMENT, vocabulary, name)
+                for value in values
+            ],
         }
 
     @staticmethod
-    def create_multi_build_field(name: str, values: list[str]) -> dict[str, Any]:
+    def create_multi_build_field(
+        name: str, values: list[str], *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a multi build custom field.
 
         Args:
             name: The field name
-            values: List of build names
+            values: The builds, each by display name or by the id of one of the field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -513,17 +664,23 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.MULTI_BUILD,
             "name": name,
-            "value": [{"$type": CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT, "name": value} for value in values],
+            "value": [
+                _bundle_element(value, CustomFieldValueTypes.BUILD_BUNDLE_ELEMENT, vocabulary, name) for value in values
+            ],
         }
 
     @staticmethod
-    def create_multi_owned_field(name: str, values: list[str]) -> dict[str, Any]:
+    def create_multi_owned_field(
+        name: str, values: list[str], *, vocabulary: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """
         Create a multi owned custom field.
 
         Args:
             name: The field name
-            values: List of owned value names
+            values: The owned values, each by display name or by the id of one of the
+                field's values
+            vocabulary: The field's own bundle values, as discovery reported them
 
         Returns:
             Dictionary representing the custom field
@@ -531,7 +688,9 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.MULTI_OWNED,
             "name": name,
-            "value": [{"$type": CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT, "name": value} for value in values],
+            "value": [
+                _bundle_element(value, CustomFieldValueTypes.OWNED_BUNDLE_ELEMENT, vocabulary, name) for value in values
+            ],
         }
 
     @staticmethod
@@ -567,6 +726,10 @@ class CustomFieldManager:
                 which would report success for a request that did not say what it meant.
             CustomFieldValueTypeError: A value is not a string, a number, or a sequence of
                 them, so no builder can state it.
+            CustomFieldValueUnresolvedError: A bundle-backed value is neither a display
+                name nor an id of that field, so it cannot be addressed.
+            CustomFieldValueAmbiguousError: A bundle-backed value is both a display name
+                and an id of that field, so neither reading can be chosen.
         """
         issue_field_type = field_info.get("issue_field_type")
         project_field_type = field_info.get("project_field_type")
@@ -595,22 +758,29 @@ class CustomFieldManager:
 
         _require_writable_value(name, values)
 
+        # The field's own vocabulary, which is what decides whether a value is written
+        # by name or by id. Discovery reads the bundle with the ids included, so they are
+        # in hand here without another round-trip.
+        vocabulary = bundle_vocabulary(field_info)
+
         # Multi-valued fields take a list, and the value element carries the same bundle
         # discriminator a single-valued one does -- so these are the same payloads with a
         # list, not a different kind of write. The enum forms are dispatched separately
         # because they are the only ones that need the discovered element type; the rest
         # fix their own from the kind.
         if issue_field_type == IssueCustomFieldTypes.MULTI_ENUM:
-            return CustomFieldManager._create_multi_bundle_backed_enum_field(name, values, field_info)
+            return CustomFieldManager._create_multi_bundle_backed_enum_field(name, values, field_info, vocabulary)
 
-        multi_value_builders = {
-            IssueCustomFieldTypes.MULTI_USER: CustomFieldManager.create_multi_user_field,
-            IssueCustomFieldTypes.MULTI_VERSION: CustomFieldManager.create_multi_version_field,
-            IssueCustomFieldTypes.MULTI_BUILD: CustomFieldManager.create_multi_build_field,
-            IssueCustomFieldTypes.MULTI_OWNED: CustomFieldManager.create_multi_owned_field,
-        }
-        if issue_field_type in multi_value_builders:
-            return multi_value_builders[issue_field_type](name, values)
+        # A user field's value is a user, addressed by login, and lives in a different id
+        # space -- so it is not a bundle element and takes no vocabulary. The rest are.
+        if issue_field_type == IssueCustomFieldTypes.MULTI_USER:
+            return CustomFieldManager.create_multi_user_field(name, values)
+        if issue_field_type == IssueCustomFieldTypes.MULTI_VERSION:
+            return CustomFieldManager.create_multi_version_field(name, values, vocabulary=vocabulary)
+        if issue_field_type == IssueCustomFieldTypes.MULTI_BUILD:
+            return CustomFieldManager.create_multi_build_field(name, values, vocabulary=vocabulary)
+        if issue_field_type == IssueCustomFieldTypes.MULTI_OWNED:
+            return CustomFieldManager.create_multi_owned_field(name, values, vocabulary=vocabulary)
 
         # Map issue field types to creation methods. Every single-valued branch goes
         # through the same count check: a branch that quietly took the first of several
@@ -626,19 +796,19 @@ class CustomFieldManager:
             return CustomFieldManager.create_single_user_field(name, values[0])
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_OWNED:
             _require_single_value(name, values, issue_field_type)
-            return CustomFieldManager.create_single_owned_field(name, values[0])
+            return CustomFieldManager.create_single_owned_field(name, values[0], vocabulary=vocabulary)
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_VERSION:
             _require_single_value(name, values, issue_field_type)
-            return CustomFieldManager.create_single_version_field(name, values[0])
+            return CustomFieldManager.create_single_version_field(name, values[0], vocabulary=vocabulary)
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_BUILD:
             _require_single_value(name, values, issue_field_type)
-            return CustomFieldManager.create_single_build_field(name, values[0])
+            return CustomFieldManager.create_single_build_field(name, values[0], vocabulary=vocabulary)
         elif issue_field_type == IssueCustomFieldTypes.SINGLE_ENUM:
             _require_single_value(name, values, issue_field_type)
-            return CustomFieldManager._create_bundle_backed_enum_field(name, values[0], field_info)
+            return CustomFieldManager._create_bundle_backed_enum_field(name, values[0], field_info, vocabulary)
         elif issue_field_type == IssueCustomFieldTypes.STATE:
             _require_single_value(name, values, issue_field_type)
-            return CustomFieldManager.create_state_field(name, values[0])
+            return CustomFieldManager.create_state_field(name, values[0], vocabulary=vocabulary)
         else:
             # A type that resolved but has no branch here: a constant added to the issue
             # vocabulary and mapped without a writer. Refused rather than defaulted.
@@ -649,18 +819,20 @@ class CustomFieldManager:
         name: str,
         value: str,
         field_info: dict[str, Any],
+        vocabulary: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build an enum-shaped field, taking the value discriminator from discovery.
 
         A bundle that reports its element type is authoritative. A plain enum field always
         reports EnumBundleElement, which is also the right default when the bundle is empty
-        and so has nothing to report.
+        and so has nothing to report. The value itself is addressed by display name or by
+        id, decided by the field's own vocabulary.
         """
         element_type = field_info.get("bundle_element_type") or CustomFieldValueTypes.ENUM_BUNDLE_ELEMENT
         return {
             "$type": IssueCustomFieldTypes.SINGLE_ENUM,
             "name": name,
-            "value": {"$type": element_type, "name": value},
+            "value": _bundle_element(value, element_type, vocabulary, name),
         }
 
     @staticmethod
@@ -668,6 +840,7 @@ class CustomFieldManager:
         name: str,
         values: list[str],
         field_info: dict[str, Any],
+        vocabulary: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build a multi enum-shaped field, taking the value discriminator from discovery.
 
@@ -679,5 +852,5 @@ class CustomFieldManager:
         return {
             "$type": IssueCustomFieldTypes.MULTI_ENUM,
             "name": name,
-            "value": [{"$type": element_type, "name": value} for value in values],
+            "value": [_bundle_element(value, element_type, vocabulary, name) for value in values],
         }
