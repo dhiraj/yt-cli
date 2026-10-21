@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to reach for a different command. A shaped read is verified the same way the list reads are: a
   requested field the API drops is refused by name, non-zero exit. The un-shaped
   read now carries `resolved` as well — the field that says whether the issue
-  shipped (#498)
+  shipped.
 - ✨ `yt issues create --custom-field` and `yt issues update --custom-field` can now set a
   field that holds several values. Repeat a field name to give it several
   (`-cf "Fix versions=1.0" -cf "Fix versions=1.1"`); on an update those values replace the
@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - 🐛 The issue panel renders `resolved` without reading a boolean as a timestamp. The
   field is a Unix-millisecond timestamp — `null` on an open issue, the instant it was
-  resolved otherwise — so it is rendered as that instant rather than as a flag (#498)
+  resolved otherwise — so it is rendered as that instant rather than as a flag.
 - 🐛 `yt issues update --custom-field` and `yt issues create --custom-field` now
   write each field with the type that field actually reports, so user, owned,
   version and build fields are no longer submitted as an enum payload and

@@ -142,7 +142,9 @@ class TestIssueManagerRetrieval:
         result = await issue_manager.get_issue("TEST-123")
 
         # `fields=None` is passed explicitly, not omitted: the manager is what turns a profile
-        # into a field expression, so the service call has to carry the result either way (#498).
+        # into a field expression, so the service call has to carry the result either way —
+        # which is what lets the shaped single-issue read check the response against what was
+        # asked for.
         issue_manager.issue_service.get_issue.assert_called_once_with("TEST-123", fields=None)
         assert result == expected_result
 

@@ -137,7 +137,9 @@ class IssueService(BaseService):
                     # `resolved` because it is the field that says whether the issue shipped,
                     # which is the one thing a read shaped as "one issue as data" is for: a
                     # caller asking whether work has landed cannot answer it without this
-                    # field (#498). It is a top-level field and the API returns it.
+                    # field. It is in the default list for the shaped single-issue read,
+                    # which is what puts it in front of that caller. It is a top-level field
+                    # and the API returns it.
                     "resolved,"
                     # No `state`, `priority` or `type`: not top-level issue fields, so the API
                     # drops them. Provable rather than assumed — every issue in a project carries

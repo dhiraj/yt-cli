@@ -268,7 +268,8 @@ class TestIssueServiceRetrieval:
 
         `resolved` because it is the field that says whether the issue shipped, which is the one
         thing a single-issue read is for — the tracker's gate requires the state to be delivered
-        *and* `resolved` to be set, so a read that omits it cannot answer "has this landed?" (#498).
+        *and* `resolved` to be set, so a read that omits it cannot answer "has this landed?",
+        which is why the shaped single-issue read carries the field by default.
         """
         with (
             patch.object(issue_service, "_make_request", new_callable=AsyncMock) as mock_request,
