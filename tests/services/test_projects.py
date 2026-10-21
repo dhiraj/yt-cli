@@ -816,7 +816,7 @@ class TestDiscoverCustomField:
                 new=AsyncMock(return_value={"status": "success", "data": detail}),
             ),
         ):
-            return await project_service.discover_custom_field("VAN", asked)
+            return await project_service.discover_custom_field("TEST", asked)
 
     @pytest.fixture(autouse=True)
     def _clear_field_cache(self):
@@ -919,7 +919,7 @@ class TestDiscoverCustomField:
                 new=AsyncMock(return_value={"status": "success", "data": detail}),
             ),
         ):
-            result = await project_service.discover_custom_field("VAN", "Sprint")
+            result = await project_service.discover_custom_field("TEST", "Sprint")
         assert result["data"]["bundle_element_type"] == "EnumBundleElement"
 
     @pytest.mark.asyncio
@@ -943,7 +943,7 @@ class TestDiscoverCustomField:
             ),
             patch.object(project_service, "get_custom_field_details", new=AsyncMock()) as mock_details,
         ):
-            result = await project_service.discover_custom_field("VAN", "Sprints")
+            result = await project_service.discover_custom_field("TEST", "Sprints")
 
         assert result["status"] == "error"
         assert "Sprint" in result["available_fields"]
@@ -971,7 +971,7 @@ class TestCustomFieldSelectors:
         ):
             mock_request.return_value = MagicMock(spec=httpx.Response)
             mock_handle.return_value = {"status": "success", "data": {"id": "180-26"}}
-            await project_service.get_custom_field_details("VAN", "180-26", include_bundle=False)
+            await project_service.get_custom_field_details("TEST", "180-26", include_bundle=False)
         return mock_request.call_args.kwargs["params"]["fields"]
 
     @staticmethod
@@ -982,7 +982,7 @@ class TestCustomFieldSelectors:
         ):
             mock_list.return_value = {"status": "success", "data": []}
             mock_details.return_value = {"status": "success", "data": {"$type": "EnumProjectCustomField"}}
-            await project_service.discover_custom_field("VAN", "Sprint")
+            await project_service.discover_custom_field("TEST", "Sprint")
         return mock_list.call_args.kwargs["fields"]
 
     @pytest.mark.asyncio
@@ -1101,7 +1101,7 @@ class TestCustomFieldSelectors:
         ):
             mock_request.return_value = MagicMock(spec=httpx.Response)
             mock_handle.return_value = {"status": "success", "data": []}
-            await project_service.get_project_custom_fields("VAN", fields=fields)
+            await project_service.get_project_custom_fields("TEST", fields=fields)
         return mock_request.call_args.kwargs["params"]["fields"]
 
 

@@ -176,7 +176,8 @@ class IssueManager:
         """
         # A profile is an expansion, so it is resolved here rather than in the service: the
         # service takes one field expression, and the command layer needs the *expanded*
-        # expression to check the response against what was actually requested (#498).
+        # expression to check the response against what was actually requested, which is
+        # what lets a shaped single-issue read refuse a field the API dropped.
         # `fields` wins when both are given, exactly as it does on the list paths.
         if field_profile and not fields:
             from ..field_selection import get_field_selector

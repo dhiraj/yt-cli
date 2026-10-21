@@ -2327,7 +2327,7 @@ class TestIssuesShowJSON:
 
 
 class TestIssuesShowFields:
-    """`yt issues show` could not shape its response (#498).
+    """`yt issues show` could not shape its response — the change that gave it `--fields`.
 
     Every other read command in the CLI accepts `--fields`, so an agent could ask for the three
     keys it needs about one issue — and this one, the command whose whole job is "one issue as

@@ -2053,10 +2053,11 @@ def show(
         result = asyncio.run(issue_manager.get_issue(issue_id, fields=fields, field_profile=profile))
 
         if result["status"] == "success":
-            # A shaped read that silently lost a field is the failure #498 is about, so it is
-            # refused the same way the list paths refuse it: by name, non-zero exit, and with
-            # the reason on stderr so a piped payload stays clean. Unshaped (`--fields` absent)
-            # there is nothing to check against — `requested_fields` is None and this no-ops.
+            # A shaped read that silently lost a field is the failure the shaped
+            # single-issue read exists to prevent, so it is refused the same way the list
+            # paths refuse it: by name, non-zero exit, and with the reason on stderr so a
+            # piped payload stays clean. Unshaped (`--fields` absent) there is nothing to
+            # check against — `requested_fields` is None and this no-ops.
             _reject_dropped_fields(result.get("requested_fields"), result["data"], format)
             if format == "json":
                 # `click.echo`, not `console.print`: Rich would parse the payload as markup and
