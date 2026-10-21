@@ -238,7 +238,7 @@ class TestIssuePanelFunctions:
 
         Verified against a live instance on 2026-10-02: `resolved` is `null` on an open issue
         and a Unix-millisecond timestamp on the same issue after `--state Verified` — the
-        very value `VAN-498` moved into the default single-issue read.
+        very value `PROJ-3` moved into the default single-issue read.
 
         The rendering is local time -- `format_timestamp` builds it with
         `datetime.fromtimestamp`, which is the host's local zone -- so one instant is a

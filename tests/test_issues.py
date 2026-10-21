@@ -2249,17 +2249,17 @@ class TestCreateAppliesTagsAndNamesTheIssue:
 
 
 class TestIssuesShowJSON:
-    """`yt issues show VAN-1 --format json` — the natural spelling for one issue as data.
+    """`yt issues show PROJ-1 --format json` — the natural spelling for one issue as data.
 
     It did not exist: `show` was `[table|panel]` only, so a caller wanting one issue as data had
-    to reach for `yt issues search "VAN-1" --format json` instead. That worked, but only by
+    to reach for `yt issues search "PROJ-1" --format json` instead. That worked, but only by
     accident — nothing about the command that names an issue could return one.
     """
 
     def _issue(self):
         return {
             "id": "3-70",
-            "idReadable": "VAN-1",
+            "idReadable": "PROJ-1",
             "summary": "A summary with [brackets] in it",
             "description": "d",
             "customFields": [{"name": "State", "value": {"name": "In Progress"}}],
@@ -2273,10 +2273,10 @@ class TestIssuesShowJSON:
         runner = CliRunner()
         with patch("youtrack_cli.main.asyncio.run") as mock_run:
             mock_run.return_value = {"status": "success", "data": self._issue()}
-            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+            result = runner.invoke(main, ["issues", "show", "PROJ-1", "--format", "json"])
 
         assert result.exit_code == 0
-        assert json_mod.loads(result.stdout)["idReadable"] == "VAN-1"
+        assert json_mod.loads(result.stdout)["idReadable"] == "PROJ-1"
 
     def test_show_json_keeps_status_off_stdout(self):
         """The progress line must not land in the middle of a payload someone is piping."""
@@ -2289,7 +2289,7 @@ class TestIssuesShowJSON:
 
         with patch("youtrack_cli.main.asyncio.run") as mock_run:
             mock_run.return_value = {"status": "success", "data": self._issue()}
-            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+            result = runner.invoke(main, ["issues", "show", "PROJ-1", "--format", "json"])
 
         assert "fetching issue" not in result.stdout.lower()
         assert "fetching issue" in result.stderr.lower()
@@ -2306,7 +2306,7 @@ class TestIssuesShowJSON:
         runner = CliRunner()
         with patch("youtrack_cli.main.asyncio.run") as mock_run:
             mock_run.return_value = {"status": "success", "data": self._issue()}
-            result = runner.invoke(main, ["issues", "show", "VAN-1", "--format", "json"])
+            result = runner.invoke(main, ["issues", "show", "PROJ-1", "--format", "json"])
 
         assert json_mod.loads(result.stdout)["summary"] == "A summary with [brackets] in it"
 
@@ -2320,7 +2320,7 @@ class TestIssuesShowJSON:
             patch("youtrack_cli.managers.issues.IssueManager.display_issue_details") as mock_display,
         ):
             mock_run.return_value = {"status": "success", "data": self._issue()}
-            result = runner.invoke(main, ["issues", "show", "VAN-1"])
+            result = runner.invoke(main, ["issues", "show", "PROJ-1"])
 
         assert result.exit_code == 0
         mock_display.assert_called_once()
@@ -2338,7 +2338,7 @@ class TestIssuesShowFields:
     """
 
     def _issue(self):
-        return {"id": "3-620", "idReadable": "VAN-498", "summary": "s", "resolved": None}
+        return {"id": "3-620", "idReadable": "PROJ-3", "summary": "s", "resolved": None}
 
     def _run(self, args, data=None):
         """Invoke the CLI with the manager's `get_issue` replaced by a recorder.
@@ -2372,7 +2372,7 @@ class TestIssuesShowFields:
     def test_fields_reaches_the_manager(self):
         """The option is forwarded, not swallowed — that was the whole defect."""
         result, recorded = self._run(
-            ["issues", "show", "VAN-498", "--format", "json", "--fields", "idReadable,resolved"]
+            ["issues", "show", "PROJ-3", "--format", "json", "--fields", "idReadable,resolved"]
         )
 
         assert result.exit_code == 0
@@ -2380,7 +2380,7 @@ class TestIssuesShowFields:
         assert recorded["field_profile"] is None
 
     def test_profile_reaches_the_manager(self):
-        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json", "--profile", "minimal"])
+        result, recorded = self._run(["issues", "show", "PROJ-3", "--format", "json", "--profile", "minimal"])
 
         assert result.exit_code == 0
         assert recorded["field_profile"] == "minimal"
@@ -2394,12 +2394,12 @@ class TestIssuesShowFields:
         """
         expression = "idReadable,resolved,customFields(name,value(name))"
         payload = {
-            "idReadable": "VAN-498",
+            "idReadable": "PROJ-3",
             "resolved": None,
             "customFields": [{"name": "State", "value": {"name": "Submitted"}}],
         }
         result, recorded = self._run(
-            ["issues", "show", "VAN-498", "--format", "json", "--fields", expression],
+            ["issues", "show", "PROJ-3", "--format", "json", "--fields", expression],
             data=payload,
         )
 
@@ -2409,7 +2409,7 @@ class TestIssuesShowFields:
 
     def test_the_short_flag_shapes_the_read_too(self):
         """`-f` is the spelling the list paths use, so it has to work here as well."""
-        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json", "-f", "idReadable,resolved"])
+        result, recorded = self._run(["issues", "show", "PROJ-3", "--format", "json", "-f", "idReadable,resolved"])
 
         assert result.exit_code == 0
         assert recorded["fields"] == "idReadable,resolved"
@@ -2428,7 +2428,7 @@ class TestIssuesShowFields:
 
         with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
             result = CliRunner().invoke(
-                main, ["issues", "show", "VAN-498", "--format", "panel", "--fields", "idReadable"]
+                main, ["issues", "show", "PROJ-3", "--format", "panel", "--fields", "idReadable"]
             )
 
         assert result.exit_code != 0
@@ -2458,7 +2458,7 @@ class TestIssuesShowFields:
 
         with patch("youtrack_cli.managers.issues.IssueManager.get_issue", recorder):
             result = CliRunner(**runner_kwargs).invoke(
-                main, ["issues", "show", "VAN-498", "--format", "json", "--fields", "idReadable"]
+                main, ["issues", "show", "PROJ-3", "--format", "json", "--fields", "idReadable"]
             )
 
         assert result.exit_code != 0
@@ -2471,7 +2471,7 @@ class TestIssuesShowFields:
         The default read reaches the API with the service's own field list, which the caller never
         named; running the dropped-field check against it would refuse correct reads.
         """
-        result, recorded = self._run(["issues", "show", "VAN-498", "--format", "json"])
+        result, recorded = self._run(["issues", "show", "PROJ-3", "--format", "json"])
 
         assert result.exit_code == 0
         assert recorded["fields"] is None and recorded["field_profile"] is None
@@ -2489,15 +2489,15 @@ class TestIssuesShowFields:
         """The manager dropped the argument the service already accepted, so nothing could pass it."""
         manager = self._manager()
 
-        asyncio.run(manager.get_issue("VAN-498", fields="idReadable,resolved"))
+        asyncio.run(manager.get_issue("PROJ-3", fields="idReadable,resolved"))
 
-        manager.issue_service.get_issue.assert_awaited_once_with("VAN-498", fields="idReadable,resolved")
+        manager.issue_service.get_issue.assert_awaited_once_with("PROJ-3", fields="idReadable,resolved")
 
     def test_manager_expands_a_profile_and_reports_what_it_sent(self):
         """The command needs the *expanded* expression to check the response against it."""
         manager = self._manager()
 
-        result = asyncio.run(manager.get_issue("VAN-498", field_profile="minimal"))
+        result = asyncio.run(manager.get_issue("PROJ-3", field_profile="minimal"))
 
         sent = manager.issue_service.get_issue.await_args.kwargs["fields"]
         assert result["requested_fields"] == sent
@@ -2507,7 +2507,7 @@ class TestIssuesShowFields:
         """Same precedence as the list paths: the explicit expression is the caller's intent."""
         manager = self._manager()
 
-        asyncio.run(manager.get_issue("VAN-498", fields="summary", field_profile="full"))
+        asyncio.run(manager.get_issue("PROJ-3", fields="summary", field_profile="full"))
 
         assert manager.issue_service.get_issue.await_args.kwargs["fields"] == "summary"
 
@@ -2538,7 +2538,7 @@ class TestIssuesShowFields:
         """Not the union of the caller's expression and the default list."""
         service, captured = self._service_with_captured_request()
 
-        asyncio.run(service.get_issue("VAN-498", fields="idReadable,resolved"))
+        asyncio.run(service.get_issue("PROJ-3", fields="idReadable,resolved"))
 
         assert captured["fields"] == "idReadable,resolved"
 
@@ -2644,7 +2644,7 @@ class TestStdoutStaysCleanOnError:
 
         with patch("youtrack_cli.main.asyncio.run") as mock_run:
             mock_run.return_value = {"status": "error", "message": "Issue not found"}
-            result = runner.invoke(main, ["issues", "show", "VAN-999999", "--format", "json"])
+            result = runner.invoke(main, ["issues", "show", "PROJ-999999", "--format", "json"])
 
         assert result.exit_code != 0
         assert result.stdout.strip() == ""

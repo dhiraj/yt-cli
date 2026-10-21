@@ -483,7 +483,7 @@ class TestFindMissingFields:
         assert find_missing_fields("idReadable,notAField", [{"summary": "s"}]) == ["idReadable", "notAField"]
 
     def test_clean_expression_reports_nothing(self):
-        assert find_missing_fields("idReadable,summary", [{"idReadable": "VAN-1", "summary": "s"}]) == []
+        assert find_missing_fields("idReadable,summary", [{"idReadable": "PROJ-1", "summary": "s"}]) == []
 
     def test_a_nested_typo_beside_a_correct_sibling_is_not_reported(self):
         # The deliberate limit of the check, pinned so it is not mistaken for a guarantee.
@@ -599,8 +599,8 @@ class TestFindMissingFields:
         assert find_missing_fields("idReadable", []) == []
 
     def test_accepts_a_single_record(self):
-        assert find_missing_fields("idReadable", {"idReadable": "VAN-1"}) == []
-        assert find_missing_fields("idReadble", {"idReadable": "VAN-1"}) == ["idReadble"]
+        assert find_missing_fields("idReadable", {"idReadable": "PROJ-1"}) == []
+        assert find_missing_fields("idReadble", {"idReadable": "PROJ-1"}) == ["idReadble"]
 
     def test_empty_expression_reports_nothing(self):
         assert find_missing_fields("", [{"summary": "s"}]) == []
@@ -611,7 +611,7 @@ class TestFindMissingFields:
         records = [
             {
                 "id": "3-70",
-                "idReadable": "VAN-1",
+                "idReadable": "PROJ-1",
                 "summary": "s",
                 "resolved": None,
                 "description": "d",
@@ -621,7 +621,7 @@ class TestFindMissingFields:
                     {
                         "direction": "OUTWARD",
                         "linkType": {"name": "Depend"},
-                        "issues": [{"idReadable": "VAN-2"}],
+                        "issues": [{"idReadable": "PROJ-2"}],
                     }
                 ],
             }
