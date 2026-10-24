@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addressed by id — its value is a user, addressed by login, and a project may attach
   teams to the same field, which is a different id space
 
+### Removed
+- 🗑️ Dropped Python 3.10 support. It reached end of life, so it is removed from
+  the test matrix, classifiers and `requires-python` (now `>=3.11`); the 3.10 EOL
+  runtime warning and the now-unused `tomli` fallback are gone (#793)
+
 ### Fixed
 - 🐛 The pre-flight check on `--priority` and `--type` now runs against the field the caller
   named, instead of against a guess at one. The project API answers with a field's name nested
