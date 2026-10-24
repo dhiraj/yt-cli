@@ -102,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suppression — and the script is now tracked as executable. Upstream sees none of this: its
   CI lint job is ruff-only (`tox -e lint`), and the pydocstyle and shebang checks run only
   inside the full `pre-commit` run
+- 🐛 Issue and project IDs whose project starts with a number, such as `4DM-123`,
+  are accepted by `yt issues comments add` and `yt issues create`; a project ID
+  still has to contain a letter (#790)
 
 ### Changed
 - ℹ️ `--priority`, `--type` and `--state` are now built from the field's own discovered type
@@ -188,7 +191,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiplicity the server does not report is now refused by name rather than
   guessed, and a field given several values that holds one is refused instead
   of quietly keeping the last (#778, #782)
-
 ### Deprecated
 - ⚠️ Python 3.10 has reached end of life. A runtime warning is now shown when
   running under Python 3.10, noting that support will stop in January 2027;
