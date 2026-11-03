@@ -179,7 +179,7 @@ class TestCustomFieldManager:
         expected = {
             "$type": "TextIssueCustomField",
             "name": "Description",
-            "value": {"$type": "TextValue", "text": "Test description"},
+            "value": {"$type": "TextFieldValue", "text": "Test description"},
         }
 
         assert field == expected

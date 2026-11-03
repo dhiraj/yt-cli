@@ -74,7 +74,7 @@ class CustomFieldValueTypes:
     DATE_VALUE = "DateValue"
     INTEGER_VALUE = "IntegerValue"
     FLOAT_VALUE = "FloatValue"
-    TEXT_VALUE = "TextValue"
+    TEXT_VALUE = "TextFieldValue"
 
 
 class VisibilityTypes:
